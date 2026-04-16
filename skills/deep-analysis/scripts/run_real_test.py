@@ -429,8 +429,8 @@ def generate_panel(dims_scored: dict, raw: dict) -> dict:
     fin_ctx = (raw.get("dimensions", {}).get("1_financials") or {}).get("data") or {}
 
     investors_out = []
-    vote_dist = {"strongly_buy": 0, "buy": 0, "watch": 0, "wait": 0, "avoid": 0, "n_a": 0}
-    sig_dist = {"bullish": 0, "neutral": 0, "bearish": 0}
+    vote_dist = {"strongly_buy": 0, "buy": 0, "watch": 0, "wait": 0, "avoid": 0, "n_a": 0, "skip": 0}
+    sig_dist = {"bullish": 0, "neutral": 0, "bearish": 0, "skip": 0}
 
     def _score_to_verdict(score: float, signal: str) -> str:
         if signal == "bullish" and score >= 80:
@@ -479,9 +479,9 @@ def generate_panel(dims_scored: dict, raw: dict) -> dict:
         reasoning = verdict_obj["rationale"]
 
         v_key = {"强烈买入": "strongly_buy", "买入": "buy", "关注": "watch",
-                 "观望": "wait", "回避": "avoid"}.get(verdict, "n_a")
+                 "观望": "wait", "回避": "avoid", "不适合": "skip"}.get(verdict, "n_a")
         vote_dist[v_key] = vote_dist.get(v_key, 0) + 1
-        sig_dist[sig] += 1
+        sig_dist[sig] = sig_dist.get(sig, 0) + 1
 
         investors_out.append({
             "investor_id": inv_id,
@@ -505,7 +505,8 @@ def generate_panel(dims_scored: dict, raw: dict) -> dict:
             "period": "中长线" if inv["group"] in ("A", "B", "E") else "短线",
         })
 
-    consensus = sig_dist["bullish"] / len(investors_out) * 100
+    active_count = len(investors_out) - sig_dist.get("skip", 0)
+    consensus = sig_dist["bullish"] / max(active_count, 1) * 100
     return {
         "ticker": raw["ticker"],
         "panel_consensus": round(consensus, 1),
