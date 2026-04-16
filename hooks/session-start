@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Session-start hook: injects UZI-Skill context into agent sessions.
+# Called by hooks.json via run-hook.cmd on SessionStart.
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# Build the context message with skill summaries
+CONTEXT="$(cat <<'SKILLS_CONTEXT'
+🎯 游资（UZI）Skills v2.2 已加载
+
+## 可用技能
+
+| 命令 | 说明 |
+|---|---|
+| `/analyze-stock <代码>` | 完整深度分析（22维 + 51评委 + Bloomberg报告） |
+| `/dcf <代码>` | DCF 估值 |
+| `/comps <代码>` | 同行对标 |
+| `/lbo <代码>` | LBO 压力测试 |
+| `/scan-trap <代码>` | 杀猪盘检测 |
+
+说"分析 XXX"即可开始深度分析。
+
+## 工作流提醒
+
+深度分析是**两段式**的：
+1. `stage1()` 自动采集数据 + 骨架分
+2. **你必须介入**：读 panel.json → role-play 51 评委 → 写 agent_analysis.json
+3. `stage2()` 合并你的分析生成报告
+
+⚠️ 不要跳过 agent 分析步骤直接出报告（除非用户明确要快速模式）。
+SKILLS_CONTEXT
+)"
+
+# Output as JSON additionalContext for Claude Code hooks
+printf '{"additionalContext": "%s"}\n' "$(echo "$CONTEXT" | sed 's/"/\\"/g' | sed ':a;N;$!ba;s/\n/\\n/g')"
