@@ -1,5 +1,88 @@
 # Release Notes
 
+## v2.9.2 — 2026-04-17 (ETF/LOF/可转债 识别 + 交互式引导到成分股)
+
+> **用户反馈：分析 `512400`（沪市有色金属 ETF）被错判为 SZ，全盘网络+数据错误；且即便修正也不该跑——51 评委是个股规则，ETF 没 ROE/护城河这些字段**
+
+### 2 个 BUG + 1 个新功能
+
+### BUG#1 · Ticker 识别错（512400 → SZ 错的）
+
+`lib/market_router.py::_a_share_suffix` 旧规则：
+
+```python
+if code6.startswith(("60", "688", "900")): return "SH"
+if code6.startswith(("83", "87", "88", "92")): return "BJ"
+return "SZ"   # 其他所有 6 位码全归 SZ
+```
+
+导致所有**沪市 ETF (5xxxxx) / 沪市可转债 (10/11xxxx)** 被错判 SZ，eastmoney
+`secid` 前缀变 `0.` 应该是 `1.` → 所有 API 全返错。
+
+**修法**：重写 `_a_share_suffix` 覆盖完整规则：
+- SH：600/601/603/605/606... · 688（科创板股票）· 900（B 股）· 50/51/52/56/58（基金）· 10/11（可转债）
+- BJ：83/87/88/92
+- SZ：其他（000/001/002/003/300/301/159/16/18/12...）
+
+### BUG#2 · ETF/LOF/可转债 混进个股流程
+
+即便 ticker 识别正确，**这些非个股标的就根本不该走 51 评委 + 22 维流程**：
+- ETF 没有 ROE / 护城河 / 管理层
+- 可转债看的是转股价 / 溢价率 / YTM
+- 基金看的是基金经理 / 规模 / 回撤
+
+**修法**：新 `classify_security_type(code6)` 识别 stock / etf / lof / convertible_bond。`fetch_basic` + `stage1` 两层早退：
+- fetch_basic 返 `error: non_stock_security`
+- stage1 早退 + 写 `_resolve_error.json`（格式同 name_not_resolved）
+
+### 新功能 · ETF 交互式引导
+
+**用户要求**："如果检测到是 etf，则告知客户这个插件对 etf 无法支持，但可以帮助他识别前十大持仓股，然后列出股票，询问他需要识别哪一只？"
+
+已落地：
+
+```
+🔴 非个股标的: 512400.SH (ETF)
+   本插件是个股深度分析引擎，51 评委跑 ROE/护城河/管理层/分红 这些个股财务指标，ETF 没这些字段
+
+   📊 不过我可以帮你识别 512400.SH 的前 10 大持仓，请选一只分析：
+
+      1. 紫金矿业     (601899.SH  ) · 占比 12.50%
+      2. 洛阳钼业     (603993.SH  ) · 占比  9.80%
+      3. 赣锋锂业     (002460.SZ  ) · 占比  8.21%
+      ...
+
+   👉 请选择要分析的成分股（告诉我编号或代码）
+      例：/analyze-stock 601899.SH  或  /analyze-stock 紫金矿业
+```
+
+同时写 `_resolve_error.json` 带 `top_holdings: [{rank, code, name, weight_pct}, ...]` + `user_prompt` 字段，agent 读到就知道走 ETF 引导流程。
+
+### SKILL.md 新增 HARD-GATE-NON-STOCK
+
+规定 agent 看到 `status: non_stock_security` 必须：
+- 绝不假装跑；用 AskUserQuestion 列 top_holdings 让用户选
+- 用户选定后用成分股代码重跑 stage1
+
+### 回归测试（51/51 · 新增 6 条）
+
+- `test_ticker_parser_sh_etf` · 512400/510500/513100/518880/588000 全部 SH
+- `test_ticker_parser_sz_etf` · 159949/159922/159928 全部 SZ
+- `test_ticker_parser_convertible_bonds` · 11xxxx SH + 12xxxx SZ
+- `test_ticker_parser_stocks_still_correct` · 个股识别不受影响
+- `test_fetch_basic_rejects_etf` · fetch_basic 必须接 classify_security_type
+- `test_stage1_early_exits_on_etf` · stage1 必须早退 + 输出 top_holdings
+
+### 改动文件
+
+- `scripts/lib/market_router.py` · 重写 `_a_share_suffix` + 新 `classify_security_type`
+- `scripts/fetch_basic.py` · ETF/LOF/CB 早退 + `_NON_STOCK_GUIDANCE` 表
+- `scripts/run_real_test.py::stage1` · 早退 + 拉前 10 持仓 + 互动 prompt
+- `skills/deep-analysis/SKILL.md` · 新 HARD-GATE-NON-STOCK
+- `scripts/tests/test_no_regressions.py` · +6 条
+
+---
+
 ## v2.9.1 — 2026-04-17 (评委汇总观点 · 6 处 bug 修复)
 
 > **用户反馈："评委打分了，但是汇总评委观点那里存在缺失和数据不对的问题"**

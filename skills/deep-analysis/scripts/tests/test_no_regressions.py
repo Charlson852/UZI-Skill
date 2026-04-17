@@ -572,6 +572,79 @@ def test_debate_no_hardcoded_default_avatars():
         "v2.9.1 regression: BEAR_ID 默认值不能硬编码 graham"
 
 
+# ─── v2.9.2 · ETF/LOF/可转债 识别与早期拦截 ──
+def test_ticker_parser_sh_etf():
+    """BUG (v2.9.2) · 512400 是 SH ETF，不能被错判为 SZ"""
+    from lib.market_router import parse_ticker, classify_security_type
+    # 用户报告的核心 case
+    ti = parse_ticker("512400")
+    assert ti.full == "512400.SH", f"BUG#2.9.2 regression: 512400 应为 SH，实际 {ti.full!r}"
+    assert classify_security_type(ti.code) == "etf"
+    # 其他 SH ETF
+    for code in ("510500", "513100", "518880", "588000"):
+        ti = parse_ticker(code)
+        assert ti.full.endswith(".SH"), f"{code} 应为 SH，实际 {ti.full}"
+
+
+def test_ticker_parser_sz_etf():
+    from lib.market_router import parse_ticker, classify_security_type
+    for code in ("159949", "159922", "159928"):
+        ti = parse_ticker(code)
+        assert ti.full.endswith(".SZ"), f"{code} 应为 SZ"
+        assert classify_security_type(ti.code) == "etf"
+
+
+def test_ticker_parser_convertible_bonds():
+    from lib.market_router import parse_ticker, classify_security_type
+    # SH 可转债 11xxxx
+    ti = parse_ticker("113517")
+    assert ti.full.endswith(".SH")
+    assert classify_security_type(ti.code) == "convertible_bond"
+    # SZ 可转债 12xxxx
+    ti = parse_ticker("123029")
+    assert ti.full.endswith(".SZ")
+    assert classify_security_type(ti.code) == "convertible_bond"
+
+
+def test_ticker_parser_stocks_still_correct():
+    """修复 ETF 识别的同时不能破坏股票识别"""
+    from lib.market_router import parse_ticker, classify_security_type
+    for code, expected in [
+        ("600519", ".SH"),   # 茅台
+        ("688981", ".SH"),   # 中芯国际 科创板
+        ("000807", ".SZ"),   # 云铝
+        ("300750", ".SZ"),   # 宁德
+        ("301000", ".SZ"),   # 创业板注册制
+        ("830799", ".BJ"),   # 北交所
+    ]:
+        ti = parse_ticker(code)
+        assert ti.full.endswith(expected), f"{code} 应为 {expected}，实际 {ti.full}"
+        assert classify_security_type(ti.code) == "stock"
+
+
+def test_fetch_basic_rejects_etf():
+    """v2.9.2 · fetch_basic 必须在看到 ETF ticker 时早期返回 non_stock_security"""
+    src = (SCRIPTS_DIR / "fetch_basic.py").read_text(encoding="utf-8")
+    assert "classify_security_type" in src, \
+        "v2.9.2 regression: fetch_basic 未接入 classify_security_type"
+    assert "non_stock_security" in src, \
+        "v2.9.2 regression: fetch_basic 缺 non_stock_security 错误类型"
+    assert "NON_STOCK_GUIDANCE" in src or "_NON_STOCK_GUIDANCE" in src, \
+        "v2.9.2 regression: fetch_basic 缺 ETF/LOF/CB 引导信息表"
+
+
+def test_stage1_early_exits_on_etf():
+    """v2.9.2 · run_real_test.stage1 必须在 ETF ticker 时早期 return，
+    不跑 22 维 fetcher 浪费时间"""
+    src = (SCRIPTS_DIR / "run_real_test.py").read_text(encoding="utf-8")
+    assert "non_stock_security" in src, \
+        "v2.9.2 regression: stage1 缺 non_stock_security 早退逻辑"
+    assert "top_holdings" in src, \
+        "v2.9.2 regression: ETF 早退必须输出 top_holdings 供用户选择"
+    assert "fund_portfolio_hold_em" in src, \
+        "v2.9.2 regression: ETF 持仓拉取接口未使用"
+
+
 if __name__ == "__main__":
     # Manual runner — no pytest required
     import inspect

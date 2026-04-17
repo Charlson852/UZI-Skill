@@ -13,7 +13,26 @@ import json
 import sys
 
 from lib import data_sources as ds
-from lib.market_router import is_chinese_name, parse_ticker
+from lib.market_router import is_chinese_name, parse_ticker, classify_security_type
+
+
+_NON_STOCK_GUIDANCE = {
+    "etf": {
+        "label": "ETF",
+        "why": "插件的 51 评委跑 ROE / 护城河 / 管理层 / 分红 等个股财务指标，ETF 没这些字段",
+        "what_to_do": "分析该 ETF 的**前 3-5 大持仓股**（ak.fund_portfolio_hold_em 可查），对每只成分股单独跑 /analyze-stock",
+    },
+    "lof": {
+        "label": "LOF 基金",
+        "why": "基金没有企业基本面字段，不适合 51 评委流程",
+        "what_to_do": "基金评估应看：基金经理 / 规模 / 持仓集中度 / 业绩基准差 / 回撤；这些该用 /fund-analyze 类工具（本插件未覆盖）",
+    },
+    "convertible_bond": {
+        "label": "可转债",
+        "why": "可转债评估看的是转股价 / 溢价率 / 到期收益率 / 赎回条款，不是 ROE",
+        "what_to_do": "集思录的可转债工具 / 东财可转债专题；或直接分析**正股**",
+    },
+}
 
 
 def main(user_input: str) -> dict:
@@ -34,6 +53,26 @@ def main(user_input: str) -> dict:
         ti = r["resolved"]
     else:
         ti = parse_ticker(user_input)
+
+    # v2.9.2 · 早期拦截 ETF/LOF/可转债（插件是个股分析引擎，跑非个股标的会输出垃圾）
+    sec_type = classify_security_type(ti.code) if ti.market == "A" else "stock"
+    if sec_type in _NON_STOCK_GUIDANCE:
+        g = _NON_STOCK_GUIDANCE[sec_type]
+        return {
+            "ticker": ti.full,
+            "market": ti.market,
+            "data": {},
+            "error": "non_stock_security",
+            "security_type": sec_type,
+            "guidance": g,
+            "message": (
+                f"{ti.full} 是 {g['label']}，不是个股。\n"
+                f"原因: {g['why']}\n"
+                f"建议: {g['what_to_do']}"
+            ),
+            "source": "market_router:classify_security_type",
+            "fallback": True,
+        }
 
     data = ds.fetch_basic(ti)
     return {

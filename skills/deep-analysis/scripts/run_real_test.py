@@ -1459,6 +1459,98 @@ def stage1(ticker: str) -> dict:
     print(f"🎯 TARGET: {ti.full}")
     print(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
 
+    # v2.9.2 · 早期拦截 ETF / LOF / 可转债（非个股不适合 51 评委流程）
+    # 跟 name_not_resolved 一样的处理：写 _resolve_error.json + return
+    if ti.market == "A":
+        try:
+            from lib.market_router import classify_security_type
+            sec_type = classify_security_type(ti.code)
+            NON_STOCK_GUIDANCE = {
+                "etf": ("ETF", "51 评委跑 ROE / 护城河 / 管理层 / 分红 这些个股财务指标，ETF 没这些字段",
+                        "建议：分析该 ETF 前 3-5 大持仓股（用 akshare.fund_portfolio_hold_em 查持仓），对每只成分股单独跑 /analyze-stock"),
+                "lof": ("LOF 基金", "基金没有企业基本面字段", "基金评估用专门的 fund-analyze 工具"),
+                "convertible_bond": ("可转债", "可转债看转股价/溢价率/到期收益率，不是 ROE", "分析正股或用集思录的可转债工具"),
+            }
+            if sec_type in NON_STOCK_GUIDANCE:
+                label, why, what_to_do = NON_STOCK_GUIDANCE[sec_type]
+                import json as _json
+                from pathlib import Path as _Path
+                safe_dir = _Path(".cache") / ti.full
+                safe_dir.mkdir(parents=True, exist_ok=True)
+
+                # v2.9.2 · ETF 特殊处理：拉前 10 大持仓供用户选择
+                top_holdings: list[dict] = []
+                if sec_type == "etf":
+                    try:
+                        import akshare as ak
+                        df = ak.fund_portfolio_hold_em(symbol=ti.code)
+                        if df is not None and not df.empty:
+                            # 找最新一期（通常按日期倒序）
+                            if "季度" in df.columns:
+                                latest_period = df["季度"].iloc[0]
+                                df_latest = df[df["季度"] == latest_period]
+                            else:
+                                df_latest = df
+                            for i, (_, row) in enumerate(df_latest.head(10).iterrows(), start=1):
+                                stock_code = str(row.get("股票代码", "") or row.get("code", "") or "").strip()
+                                stock_name = str(row.get("股票名称", "") or row.get("name", "") or "").strip()
+                                pct_raw = row.get("占净值比例") or row.get("比例") or row.get("weight") or ""
+                                try:
+                                    pct = float(str(pct_raw).replace("%", "")) if pct_raw else 0
+                                except (ValueError, TypeError):
+                                    pct = 0
+                                if stock_code and stock_name:
+                                    # 标准化股票代码：补交易所后缀
+                                    try:
+                                        _ti_stock = parse_ticker(stock_code)
+                                        full_code = _ti_stock.full
+                                    except Exception:
+                                        full_code = stock_code
+                                    top_holdings.append({
+                                        "rank": i,
+                                        "code": full_code,
+                                        "name": stock_name,
+                                        "weight_pct": round(pct, 2) if pct else None,
+                                    })
+                    except Exception as _e:
+                        print(f"  ⚠️ 拉 ETF 持仓失败: {type(_e).__name__}: {str(_e)[:80]}")
+
+                err_payload = {
+                    "status": "non_stock_security",
+                    "security_type": sec_type,
+                    "ticker": ti.full,
+                    "label": label,
+                    "why": why,
+                    "what_to_do": what_to_do,
+                    "top_holdings": top_holdings,  # ETF 才填
+                    "message": (
+                        f"{ti.full} 是 {label}，不是个股 — 本插件未设计支持这类标的。\n"
+                        f"原因: {why}\n"
+                        f"{what_to_do}"
+                    ),
+                    "user_prompt": (
+                        "请选择要分析的成分股（输入编号或代码），例如：`/analyze-stock 1` 或 `/analyze-stock 601899`"
+                        if top_holdings else ""
+                    ),
+                }
+                (safe_dir / "_resolve_error.json").write_text(
+                    _json.dumps(err_payload, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+                print(f"\n🔴 非个股标的: {ti.full} ({label})")
+                print(f"   本插件是**个股**深度分析引擎，{why}")
+                if sec_type == "etf" and top_holdings:
+                    print(f"\n   📊 不过我可以帮你识别 {ti.full} 的前 {len(top_holdings)} 大持仓，请选一只分析：\n")
+                    for h in top_holdings:
+                        pct_str = f"{h['weight_pct']:.2f}%" if h.get("weight_pct") else "—"
+                        print(f"     {h['rank']:2d}. {h['name']:12} ({h['code']:12}) · 占比 {pct_str}")
+                    print(f"\n   👉 请选择要分析的成分股（告诉我编号或代码）")
+                    print(f"      例：/analyze-stock {top_holdings[0]['code']}  或  /analyze-stock {top_holdings[0]['name']}")
+                else:
+                    print(f"   {what_to_do}")
+                return err_payload
+        except Exception as e:
+            print(f"  ⚠️ 非个股检测出错，继续走正常流程: {type(e).__name__}: {str(e)[:80]}")
+
     print("📊 Task 1 · 数据采集")
     raw = collect_raw_data(ti.full)
     write_task_output(ti.full, "raw_data", raw)

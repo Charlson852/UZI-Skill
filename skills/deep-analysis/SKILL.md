@@ -46,6 +46,47 @@ description: 个股深度分析的核心工作流。当用户要求"深度分析
 唯一例外：用户原话含"自动选最相近的"或明确说"就是 Top1" — 此时可以不问
 </HARD-GATE>
 
+### ⛔ HARD-GATE-NON-STOCK · ETF/LOF/可转债 必须引导到成分股（v2.9.2）
+
+<HARD-GATE>
+若 `stage1()` 返回 `{"status": "non_stock_security", "security_type": "etf|lof|convertible_bond", ...}`
+（或 `.cache/{ticker}/_resolve_error.json` 有 `status: non_stock_security`），
+你**绝不能**假装继续跑——51 评委规则全是个股财务指标，ETF/基金/可转债
+根本不该走这个 pipeline。
+
+你必须：
+
+1. 读 `_resolve_error.json`，拿 `label` / `why` / `top_holdings`
+2. **向用户明确说明**："本插件是**个股**深度分析引擎，{label} 未覆盖"
+3. **若是 ETF**（`top_holdings` 非空）：
+   - 列出前 10 大持仓（已在 payload 里）：rank / name / code / weight_pct
+   - 用 `AskUserQuestion` 问："你想分析 ETF 里的哪只成分股？"
+   - 用户选定后用**成分股代码**（如 `601899.SH`）重跑 `stage1()`
+4. **若是 LOF 基金**：告知"基金评估用专门工具，本插件只分析个股"
+5. **若是可转债**：建议"分析正股或用集思录可转债工具"
+
+**绝不能**：
+- 硬把 ETF 跑完 stage1（22 维大多 N/A）
+- 虚构"ETF 评委意见"（51 评委从没为 ETF 设计过规则）
+- 看到 `_resolve_error.json` 就忽略继续调 stage2
+
+Payload 示例（agent 看到这个就知道该走 ETF 引导流程）:
+```json
+{
+  "status": "non_stock_security",
+  "security_type": "etf",
+  "ticker": "512400.SH",
+  "label": "ETF",
+  "top_holdings": [
+    {"rank": 1, "code": "601899.SH", "name": "紫金矿业", "weight_pct": 12.5},
+    {"rank": 2, "code": "603993.SH", "name": "洛阳钼业", "weight_pct": 9.8},
+    ...
+  ],
+  "user_prompt": "请选择要分析的成分股（输入编号或代码）"
+}
+```
+</HARD-GATE>
+
 ### ⛔ HARD-GATE-QUALITATIVE · 6 维定性维度必须 agent 深度分析（v2.4）
 
 <HARD-GATE>
