@@ -17,6 +17,8 @@
     1. HTML 报告本地路径
     2. 如果 --remote: 一个 https://xxx.trycloudflare.com 公网链接
 """
+from __future__ import annotations  # v2.6 · Python 3.9 兼容（默认 macOS python3）
+
 import os
 import sys
 import argparse
@@ -69,6 +71,18 @@ def _load_dotenv():
 
 
 _load_dotenv()
+
+
+def _get_version() -> str:
+    """v2.6 · Read version from .claude-plugin/plugin.json so banner stays in sync."""
+    try:
+        import json
+        manifest = ROOT_DIR / ".claude-plugin" / "plugin.json"
+        if manifest.exists():
+            return json.loads(manifest.read_text(encoding="utf-8")).get("version", "?")
+    except Exception:
+        pass
+    return "?"
 
 
 def detect_environment() -> dict:
@@ -232,6 +246,8 @@ def main():
                         help="HTTP 服务端口 (默认 8976)")
     parser.add_argument("--force-name", metavar="CODE",
                         help="绕过中文名纠错直接使用指定代码 (如 --force-name 000582.SZ)")
+    parser.add_argument("--no-resume", action="store_true",
+                        help="v2.6 · 强制重抓所有 fetcher（默认 resume：复用 .cache/{ticker}/raw_data.json 已有维度）")
     args = parser.parse_args()
 
     # v2.3 · --force-name 直接覆盖
@@ -243,7 +259,7 @@ def main():
 
     print()
     print("━" * 50)
-    print("🎯 游资（UZI）Skills v2.2 · 深度分析引擎")
+    print(f"🎯 游资（UZI）Skills v{_get_version()} · 深度分析引擎")
     print(f"   目标: {args.ticker}")
     print(f"   环境: {'Codex' if env['is_codex'] else 'Docker' if env['is_docker'] else 'SSH' if env['is_ssh'] else '本地'}")
     print(f"   浏览器: {'✓' if env['has_browser'] and not args.no_browser else '✗ (headless)'}")
@@ -261,6 +277,23 @@ def main():
         print(f"🔑 MX_APIKEY 已设置 · 将优先使用东财妙想 API")
     else:
         print(f"ℹ️  未设置 MX_APIKEY · 走默认 akshare/xueqiu 链（可在 .env 里配置）")
+
+    # v2.6 · resume 状态提示 + Codex 自适配
+    cache_root = SCRIPTS_DIR / ".cache" / args.ticker
+    has_cache = cache_root.exists() and (cache_root / "raw_data.json").exists()
+    if has_cache and not args.no_resume:
+        print(f"♻️  resume 模式 · 复用 .cache/{args.ticker}/raw_data.json 已有维度（用 --no-resume 强制重抓）")
+    elif args.no_resume:
+        print(f"🔄 --no-resume · 强制重抓所有 22 个 fetcher")
+        os.environ["UZI_NO_RESUME"] = "1"
+
+    if env["is_codex"]:
+        print(f"⚙️  Codex 环境检测：")
+        print(f"   - mini_racer 锁已启用 (akshare 并行 V8 安全)")
+        print(f"   - per-fetcher 90s timeout 启用")
+        if not os.environ.get("MX_APIKEY"):
+            print(f"   ⛔ 强烈建议设 MX_APIKEY · push2 在境外环境常被反向限制")
+        print(f"   - resume 默认开启（网络不稳，断了能续）")
 
     # 运行分析（抑制 run_real_test 内部的自动开浏览器）
     os.environ["UZI_NO_AUTO_OPEN"] = "1"

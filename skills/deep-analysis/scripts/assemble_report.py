@@ -24,6 +24,24 @@ def _safe(v, default="—"):
     return v if v not in (None, "", "nan") else default
 
 
+# v2.6 · Read version from plugin manifest so report banner stays in sync
+_PLUGIN_VERSION_CACHE = None
+def _get_plugin_version() -> str:
+    global _PLUGIN_VERSION_CACHE
+    if _PLUGIN_VERSION_CACHE is not None:
+        return _PLUGIN_VERSION_CACHE
+    try:
+        # ROOT = skills/deep-analysis · ROOT.parent.parent = repo root
+        manifest = ROOT.parent.parent / ".claude-plugin" / "plugin.json"
+        if manifest.exists():
+            _PLUGIN_VERSION_CACHE = json.loads(manifest.read_text(encoding="utf-8")).get("version", "?")
+            return _PLUGIN_VERSION_CACHE
+    except Exception:
+        pass
+    _PLUGIN_VERSION_CACHE = "?"
+    return _PLUGIN_VERSION_CACHE
+
+
 GROUP_LABELS = {"A": "价值", "B": "成长", "C": "宏观", "D": "技术", "E": "中国", "F": "游资", "G": "量化"}
 
 
@@ -2490,6 +2508,7 @@ def assemble(ticker: str) -> Path:
         "{{MARKET_STATUS}}": market_status().get("label", ""),
         "{{MARKET_STATUS_CLASS}}": "open" if market_status().get("is_open") else "closed",
         "{{DATA_FETCHED_AT}}": (raw.get("fetched_at") or "")[:19].replace("T", " "),
+        "{{PLUGIN_VERSION}}": _get_plugin_version(),
     }
     for k, v in replacements.items():
         template = template.replace(k, str(v))

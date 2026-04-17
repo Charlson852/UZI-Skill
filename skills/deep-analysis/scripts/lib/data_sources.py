@@ -45,6 +45,70 @@ except ImportError:
     requests = None
 
 
+# ─────────────────────────────────────────────────────────────
+# v2.6 · Tencent qt 通用价格兜底 — 适用于 A/H/U 三市场，简洁稳定
+# qt.gtimg.cn 不需 key、无反爬历史，是 push2 挂掉时的可靠备选
+# 字段格式：v_{prefix}{code}="type~name~code~current~prev~open~vol~..."
+# ─────────────────────────────────────────────────────────────
+def _fetch_price_tencent_qt(market: str, code_raw: str) -> dict:
+    """Returns {price, change_pct, prev_close, open, high, low, pe_ttm?, pb?, name?}.
+
+    Empty dict on any failure. NEVER raises.
+    market: "A" → "sh"/"sz" prefix (decided by code prefix), "H" → "hk", "U" → "us"
+    """
+    if requests is None:
+        return {}
+    if market == "A":
+        prefix = "sh" if code_raw.startswith(("60", "688", "900")) else "sz"
+        symbol = f"{prefix}{code_raw}"
+    elif market == "H":
+        symbol = f"hk{code_raw.zfill(5)}"
+    elif market == "U":
+        symbol = f"us{code_raw}"
+    else:
+        return {}
+    url = f"https://qt.gtimg.cn/q={symbol}"
+    try:
+        r = requests.get(url, timeout=8, headers={"User-Agent": "Mozilla/5.0"})
+        if r.status_code != 200:
+            return {}
+        text = r.content.decode("gbk", errors="replace")
+        if "=" not in text or '"' not in text:
+            return {}
+        # Extract content inside quotes
+        content = text.split("=", 1)[1].strip().rstrip(";").strip().strip('"')
+        parts = content.split("~")
+        if len(parts) < 35:
+            return {}
+        def _f(idx):
+            try:
+                v = parts[idx].strip()
+                return float(v) if v and v != "-" else None
+            except (ValueError, IndexError):
+                return None
+        out = {
+            "name": parts[1] if parts[1] else None,
+            "price": _f(3),
+            "prev_close": _f(4),
+            "open": _f(5),
+            "change_pct": _f(32),
+            "high": _f(33),
+            "low": _f(34),
+        }
+        # PE / PB only present for A-share (and even then only sh prefix)
+        if len(parts) > 39:
+            pe = _f(39)
+            if pe is not None:
+                out["pe_ttm"] = pe
+        if len(parts) > 46:
+            pb = _f(46)
+            if pb is not None:
+                out["pb"] = pb
+        return {k: v for k, v in out.items() if v is not None}
+    except Exception:
+        return {}
+
+
 def _retry(fn, attempts: int = 3, sleep: float = 0.8):
     last_err = None
     for i in range(attempts):
@@ -386,6 +450,22 @@ def _fetch_basic_a(ti: TickerInfo) -> dict:
         except Exception as e:
             out["_baidu_mcap_err"] = str(e)[:80]
 
+    # v2.6 · FINAL FALLBACK · Tencent qt — XueQiu/push2/baidu 全挂时的兜底
+    # 不需 key、无反爬、稳定，特别适合 Codex/海外环境
+    if not out.get("price"):
+        qt = _fetch_price_tencent_qt("A", ti.code)
+        if qt.get("price"):
+            out["price"] = qt["price"]
+            out["change_pct"] = out.get("change_pct") or qt.get("change_pct")
+            out["open"] = out.get("open") or qt.get("open")
+            out["prev_close"] = out.get("prev_close") or qt.get("prev_close")
+            out["high"] = out.get("high") or qt.get("high")
+            out["low"] = out.get("low") or qt.get("low")
+            out["pe_ttm"] = out.get("pe_ttm") or qt.get("pe_ttm")
+            out["pb"] = out.get("pb") or qt.get("pb")
+            out["name"] = out.get("name") or qt.get("name")
+            out["_fallback_snap"] = (out.get("_fallback_snap", "") + "+tencent_qt").lstrip("+")
+
     return out
 
 
@@ -517,6 +597,18 @@ def _fetch_basic_hk(ti: TickerInfo) -> dict:
                 out["_fallback_snap"] = (out.get("_fallback_snap", "") + "+mx").lstrip("+")
         except Exception as e:
             out["_mx_err"] = f"{type(e).__name__}: {str(e)[:120]}"
+
+    # v2.6 · QUATERNARY · Tencent qt 兜底（HK price 在前 3 层都缺时常发生）
+    if not out.get("price"):
+        qt = _fetch_price_tencent_qt("H", code5)
+        if qt.get("price"):
+            out["price"] = qt["price"]
+            out["change_pct"] = out.get("change_pct") or qt.get("change_pct")
+            out["open"] = out.get("open") or qt.get("open")
+            out["prev_close"] = out.get("prev_close") or qt.get("prev_close")
+            out["high"] = out.get("high") or qt.get("high")
+            out["low"] = out.get("low") or qt.get("low")
+            out["_fallback_snap"] = (out.get("_fallback_snap", "") + "+tencent_qt").lstrip("+")
 
     return out
 

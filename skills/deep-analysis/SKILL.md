@@ -81,6 +81,29 @@ description: 个股深度分析的核心工作流。当用户要求"深度分析
 用户要求原话："不能只靠数据爬取，必须要 agent 介入高强度分析 + 多 agent 操作一定要加入进去"
 </HARD-GATE>
 
+### ⛔ HARD-GATE-FACTCHECK · 禁止编造未在 raw_data 出现的事实（v2.6）
+
+<HARD-GATE>
+论坛反馈过实际事件：分析"药明康德"时把它和"苹果订单"关联（药明康德是 CRO 不是
+果链供应商）。这是 LLM 联想编造典型。
+
+每条 dim_commentary / debate_say / risks 必须满足：
+1. 引用的公司业务必须在 `raw_data.dimensions["0_basic"].data.main_business`
+   或 `["5_chain"]` 或 `["15_events"]` 中能找到出处
+2. 引用的财务数字必须在 `["1_financials"]` 中
+3. 引用的政策必须在 `["13_policy"]` snippets 里
+4. 不确定的关联用 "据公开报道"/"待 web search 验证" 而不是肯定语气
+5. 任何"X 公司是 Y 行业供应链一环"这种宏大叙事，必须 cite raw_data 里的具体证据
+
+绝对禁止：
+- "X（光学公司）受益于 Apple 订单" — 除非 raw_data 里有 Apple 客户关联
+- "Y 公司是新能源核心标的" — 除非 raw_data 提到具体新能源业务
+- "国家战略支持本股" — 除非 dim_policy 有具体政策原文 cite
+
+非 Claude 模型（Codex/国产模型）尤其容易踩这个坑。stage2 不会自动检测事实正确性，
+质量靠 agent 自查。
+</HARD-GATE>
+
 ### ⛔ HARD-GATE-DATAGAPS · 数据缺口 agent 必须接管（v2.3）
 
 <HARD-GATE>
@@ -612,6 +635,32 @@ python run.py <股票代码> --no-browser      # 强制不打开浏览器
 > "你现在在电脑前吗？如果不在，我可以生成一个公网链接方便手机查看。"
 
 如果用户说不在电脑前 → 加 `--remote` 参数。
+
+### Codex / 国产模型 自适配（v2.6 论坛 bug 修复）
+
+非 Claude 平台跑 UZI-Skill 时常见问题已被代码层修复，但 agent 也要主动适配：
+
+| 论坛报告问题 | v2.6 代码层做了什么 | agent 还要做什么 |
+|---|---|---|
+| `KeyError: 'skip'` | preview_with_mock.py 加 'skip' key + .get() 兜底 | 无 |
+| 失败卡死整条 pipeline | as_completed/result 加 90s timeout，单 fetcher 超时不影响其他 | 不要绕过 timeout 重试 |
+| 中断不能续跑 | stage1 默认 `--resume`，每 3 个 fetcher 增量保存 raw_data.json | 不要手动 `--no-resume` 除非真要重抓 |
+| Python 3.9 语法报错 | 所有新文件加 `from __future__ import annotations` | 无 |
+| mini_racer V8 thread crash | 给 fetch_industry/capital_flow/valuation 加共享锁 | 无 |
+| share/war report 渲染失败 | render_*.py 加 main() alias | 无 |
+| 非 Claude agent_analysis 错乱 | stage2 调用 `lib.agent_analysis_validator.validate()` 写 `_agent_analysis_errors.json` | 跑完看 console 是否有 🔴 schema error，按提示修 |
+| Top bull/bear 排序错乱 | 排除 score=0 异常，按 score 排（不再先按 signal 分组） | 检查 panel.json 数据合理性 |
+| 编造事实 (药明康德↔Apple) | HARD-GATE-FACTCHECK 强制 cite raw_data | **agent 写每条结论都要能在 raw_data 找出处** |
+
+**Codex 启动时检测**：
+```bash
+echo "${CODEX:-${OPENAI_API_KEY:+codex_via_openai}}"
+```
+
+**Codex 推荐设置**：
+- `MX_APIKEY=...` 必设（push2 在境外更不稳）
+- `--remote` 默认开（生成公网链接，无需 GUI）
+- `--no-resume` 别加（断网了能续）
 
 ---
 

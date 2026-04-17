@@ -1,5 +1,56 @@
 # Release Notes
 
+## v2.6.0 — 2026-04-17
+
+> **论坛 11 项 bug 综合修复 + Codex 测试发现的 5 个 PR#2 blocker**
+
+### 论坛报告 bug（来自 [linux.do/t/topic/1981105](https://linux.do/t/topic/1981105)）
+
+| # | bug | v2.6 修复 | 文件 |
+|---|---|---|---|
+| 2 | `KeyError: 'skip'` | preview_with_mock.py 加 'skip' key + .get() 兜底 | `preview_with_mock.py:322` |
+| 11 | 失败卡死整条 pipeline | `as_completed(timeout=300)` + `result(timeout=90)` + 长尾 fetcher 180s 例外 | `run_real_test.py:113-220` |
+| 9 | OpenCode 跑到 60% 停止不能续 | `collect_raw_data(resume=True)` + 增量保存 raw_data.json + `--no-resume` flag | `run_real_test.py` + `run.py` |
+| 3 | python 直跑报错 | Py3.9 兼容（A） + 全部 import 测过 + render alias（E） | 多文件 |
+| 10 | pypi 超时 | v2.4 已 4 级镜像 fallback；v2.6 加诊断输出 | `run.py:check_dependencies` |
+| 8 | 反爬数据缺失 | 新增 `_fetch_price_tencent_qt(market, code)` A/H/U 通用价格兜底 | `lib/data_sources.py` |
+| 5 | 排序异常（最看空 27 vs 0 不一致） | 排除 score=0 异常 + 按 score 排（不再按 signal 分组）+ 矛盾警示 | `run_real_test.py:712-746` |
+| 6 | 编造事实（药明康德↔Apple） | 新 HARD-GATE-FACTCHECK 强制 cite raw_data | `SKILL.md` |
+| 1 | 非 Claude 评委对齐错位 | 新 `lib/agent_analysis_validator.py` schema 校验 + `_agent_analysis_errors.json` 写盘 | 新文件 + stage2 |
+| 4 | Codex 兼容差 | run.py Codex 检测增强 + SKILL.md 新增"Codex 自适配"小节 | `run.py` + `SKILL.md` |
+| 7 | Claude plugin 不能执行 | hooks.json 直调 session-start（去掉 polyglot run-hook.cmd 中间层）+ chmod | `hooks/hooks.json` + `hooks/README.md` |
+
+### Codex 在 PR#2 测试中发现的 5 个 BLOCKER
+
+| Blocker | 修复 |
+|---|---|
+| A: `str \| None` Python 3.10+ 语法在 3.9 报错 | `from __future__ import annotations` 加到所有 v2.3+ 新文件 + run.py |
+| B: `mini_racer` V8 thread crash on 600519 | 给 fetch_industry/capital_flow/valuation 加共享 `_MINI_RACER_LOCK` |
+| C: 报告 banner 还显示 v2.2 | run.py + assemble_report.py 动态读 plugin.json，模板加 `{{PLUGIN_VERSION}}` |
+| D: HK price 是 None | Tencent qt 兜底（同 bug 8）实测 00700 拿到 ¥510 |
+| E: render_share_card / render_war_report 缺 main() | 加 `main = render` alias |
+
+### 新增 lib
+
+- `lib/agent_analysis_validator.py` — schema 校验 (~250 行)
+  - 检查 dim_commentary/panel_insights/great_divide_override/narrative_override/buy_zones 类型
+  - error 级 + warning 级
+  - `format_issues()` 漂亮控制台输出
+
+### 新增 flag
+
+- `python run.py {ticker} --no-resume` — 强制重抓全部 22 fetcher
+- 默认 resume：复用 `.cache/{ticker}/raw_data.json` 中已有有效维度（节省 80% 时间）
+
+### 测试验证
+
+- ✅ Python 3.9.6 (默认 macOS python3) 可 import 所有模块
+- ✅ Python 3.13 (conda) 跑通完整流程
+- ✅ Tencent qt 三市场实测：A 600519 / H 00700 / U AAPL 都返回有效 price
+- ✅ Validator 自测 3 个 case 通过
+
+---
+
 ## v2.5.0 — 2026-04-17
 
 ### 数据源注册表（v2.5 主题）

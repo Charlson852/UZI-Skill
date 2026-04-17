@@ -318,8 +318,9 @@ VERDICTS = {
 }
 
 panel_investors = []
-vote_dist = {"strongly_buy": 0, "buy": 0, "watch": 0, "wait": 0, "avoid": 0, "n_a": 0}
-sig_dist = {"bullish": 0, "neutral": 0, "bearish": 0}
+# v2.6 · 与 run_real_test.py:454 对齐，加 'skip' key 防御 KeyError
+vote_dist = {"strongly_buy": 0, "buy": 0, "watch": 0, "wait": 0, "avoid": 0, "n_a": 0, "skip": 0}
+sig_dist = {"bullish": 0, "neutral": 0, "bearish": 0, "skip": 0}
 
 for inv in INVESTORS:
     r = random.random()
@@ -335,7 +336,8 @@ for inv in INVESTORS:
     verdict = random.choice(VERDICTS[sig])
     v_key = {"强烈买入": "strongly_buy", "买入": "buy", "关注": "watch", "观望": "wait", "回避": "avoid"}.get(verdict, "n_a")
     vote_dist[v_key] = vote_dist.get(v_key, 0) + 1
-    sig_dist[sig] += 1
+    # v2.6 · 用 .get() 防御未来新 signal type 引发 KeyError
+    sig_dist[sig] = sig_dist.get(sig, 0) + 1
     reason = pick_comment(sig, inv["group"])
     panel_investors.append({
         "investor_id": inv["id"],

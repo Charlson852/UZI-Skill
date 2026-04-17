@@ -224,9 +224,21 @@ browser_sources = playwright_sources_for("4_peers", "A")
 - `fetch_capital_flow.py` HK 分支返回港股通资格 + 30 日市值变化
 - `fetch_events.py` HK 分支抓 HKEXNews + 中文 web search 兜底
 
+## ⚙️ v2.6 论坛 bug 修复速查（重要 · 影响 agent 行为）
+
+| 论坛 bug | 修了什么 | agent 仍要做什么 |
+|---|---|---|
+| 失败卡死 | per-fetcher 90s timeout | 不要重试 timeout 维度，让 _data_gaps.json 触发恢复 |
+| 中断不能续 | `--resume` 默认开 | 第二次跑同股 agent 应直接调 stage2 (raw_data 已有) |
+| 非 Claude 评委对齐错位 | schema validator 写 `_agent_analysis_errors.json` | 跑完 stage2 看 console 是否有 🔴 错误，按 `_agent_analysis_errors.json` suggestion 改 |
+| 编造事实（药明康德↔Apple） | HARD-GATE-FACTCHECK | 每条 commentary cite raw_data 出处，不确定的不要肯定语气 |
+| Codex 兼容差 | run.py 自动 Codex 检测 + mini_racer 锁 | Codex 环境必设 `MX_APIKEY`，不要 `--no-resume` |
+| Claude plugin 不能执行 | hooks.json 直调 session-start | 装完跑 `chmod +x hooks/session-start` |
+
 ## 注意
 
 - A 股：`600519.SH` / `002273.SZ` / `贵州茅台`
 - 港股：`00700.HK`
 - 美股：`AAPL`
-- 不需要 API key（但建议设置 `MX_APIKEY` 提高稳定性）
+- 不需要 API key（但**建议设置 `MX_APIKEY`** 提高稳定性，特别是 Codex/海外环境）
+- v2.6 默认 `--resume` · 强制重抓加 `--no-resume`

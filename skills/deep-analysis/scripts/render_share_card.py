@@ -49,6 +49,11 @@ def render(ticker: str, selector: str = "#share-card", out_name: str = "share-ca
     return out_path
 
 
+# v2.6 · run_real_test.stage2 expects `from render_share_card import main`
+# Provide alias so both `render(...)` and `main(...)` work.
+main = render
+
+
 if __name__ == "__main__":
     ticker = sys.argv[1] if len(sys.argv) > 1 else "002273.SZ"
     render(ticker)

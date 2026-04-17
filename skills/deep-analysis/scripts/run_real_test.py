@@ -59,27 +59,83 @@ FETCHER_MAP = [
 ]
 
 
+# v2.6 · mini_racer (V8 isolate) 不是 thread-safe，多线程同时初始化会触发
+# `Check failed: !pool->IsInitialized()` 致命错误。已知用 mini_racer 的 akshare 函数：
+#   - fetch_industry → ak.stock_industry_pe_ratio (cninfo)
+#   - fetch_capital_flow → ak.stock_individual_fund_flow (em fund flow)
+#   - fetch_valuation → ak.stock_a_pe_and_pb (lg)
+# 给这些 fetcher 加共享锁，强制串行化，其他 fetcher 仍并行。
+import threading as _threading
+_MINI_RACER_FETCHERS = {"fetch_industry", "fetch_capital_flow", "fetch_valuation"}
+_MINI_RACER_LOCK = _threading.Lock()
+
+
 def run_fetcher(module_name: str, args: tuple) -> dict:
     try:
         mod = __import__(module_name)
-        result = mod.main(*args)
+        if module_name in _MINI_RACER_FETCHERS:
+            with _MINI_RACER_LOCK:
+                result = mod.main(*args)
+        else:
+            result = mod.main(*args)
         return result if isinstance(result, dict) else {"data": result}
     except Exception as e:
         traceback.print_exc(file=sys.stderr)
         return {"data": {}, "source": module_name, "fallback": True, "error": f"{type(e).__name__}: {e}"}
 
 
-def collect_raw_data(ticker: str, max_workers: int = 6) -> dict:
+def collect_raw_data(ticker: str, max_workers: int = 6, resume: bool = True) -> dict:
     """Parallel fetcher execution via ThreadPoolExecutor.
 
     Strategy: run fetch_basic first (others depend on industry etc), then
     spawn all remaining fetchers in parallel. Bonus fetchers (fund_holders,
     similar_stocks) run in a second wave since they depend on base cache.
+
+    v2.6 · resume mode: if `.cache/{ticker}/raw_data.json` already exists,
+    skip dims that already have valid data. Realtime dims (price snapshots)
+    are always re-fetched. Use `resume=False` (or env UZI_NO_RESUME=1) to
+    force full re-fetch.
     """
+    # v2.6 · 允许通过 env 关闭 resume（run.py --no-resume 设置）
+    if os.environ.get("UZI_NO_RESUME") == "1":
+        resume = False
     from datetime import datetime as _dt
     raw = {"ticker": ticker, "market": "A", "fetched_at": _dt.now().isoformat(timespec="seconds")}
     dims: dict = {}
     t0 = time.time()
+
+    # v2.6 · resume: 加载已有 raw_data.json 中的 dim 缓存
+    cached_dims: dict = {}
+    if resume:
+        from lib.cache import read_task_output as _read_cache
+        # 尝试用原始 ticker 和可能的 resolved ticker 都查
+        prev = _read_cache(ticker, "raw_data")
+        if prev and isinstance(prev.get("dimensions"), dict):
+            cached_dims = prev["dimensions"]
+            valid_count = sum(
+                1 for d in cached_dims.values()
+                if isinstance(d, dict)
+                and d.get("data")
+                and not d.get("_timeout")
+                and not d.get("error")
+            )
+            if valid_count > 0:
+                print(f"  [resume] 检测到已有缓存 · {valid_count}/{len(cached_dims)} 维有效，跳过这些 fetcher")
+                print(f"           （用 --no-resume 强制重抓）")
+
+    # 哪些 dim 总是重抓（实时数据）
+    REALTIME_DIMS = {"0_basic"}  # basic 含 price/change_pct 必须 fresh
+    # （2_kline 是 daily snapshot，可以 resume；其他 dim 全部 daily/quarterly TTL）
+
+    def _is_dim_cached_valid(dim_key: str) -> bool:
+        if not resume:
+            return False
+        if dim_key in REALTIME_DIMS:
+            return False
+        d = cached_dims.get(dim_key)
+        if not isinstance(d, dict):
+            return False
+        return bool(d.get("data")) and not d.get("_timeout") and not d.get("error")
 
     # ── Wave 1: fetch_basic (串行, 后续 fetcher 依赖它拿 industry) ──
     print("  [wave 1] fetch_basic ...", end="", flush=True)
@@ -99,9 +155,31 @@ def collect_raw_data(ticker: str, max_workers: int = 6) -> dict:
         raw["market"] = dims["0_basic"].get("data", {}).get("market", "A")
 
     # ── Wave 2: all other 19 fetchers in parallel ──
-    print(f"  [wave 2] 19 fetchers parallel (max_workers={max_workers})...")
+    # v2.6 · 加 per-fetcher timeout + overall timeout 防止 hang 卡死整条流水线
+    # v2.6 · resume: 已缓存有效的 dim 直接复用，不重新调 fetcher
     wave2_start = time.time()
-    others = [(m, d, a) for m, d, a in FETCHER_MAP if d != "0_basic"]
+    all_others = [(m, d, a) for m, d, a in FETCHER_MAP if d != "0_basic"]
+    # 分流
+    others = []
+    skipped_cached = []
+    for m, d, a in all_others:
+        if _is_dim_cached_valid(d):
+            dims[d] = cached_dims[d]
+            skipped_cached.append(d)
+        else:
+            others.append((m, d, a))
+    if skipped_cached:
+        print(f"  [resume] 跳过 {len(skipped_cached)} 个已缓存维度: {', '.join(skipped_cached[:5])}{'...' if len(skipped_cached) > 5 else ''}")
+    print(f"  [wave 2] {len(others)}/{len(all_others)} fetchers parallel (max_workers={max_workers}, per-fetcher 90s)...")
+
+    # 长尾 fetcher 给更长 timeout（拉研报 / 拉公告 通常较慢）
+    PER_FETCHER_TIMEOUT_OVERRIDES = {
+        "6_research": 180,    # akshare research_report 拉 30+ 篇
+        "1_financials": 150,  # 多张财报合并
+        "10_valuation": 150,  # 历史估值分位计算
+        "15_events": 120,     # 公告 + web search
+    }
+    DEFAULT_PER_FETCHER_TIMEOUT = 90
 
     def _run_one(item):
         mod_name, dim_key, args_fn = item
@@ -110,19 +188,69 @@ def collect_raw_data(ticker: str, max_workers: int = 6) -> dict:
         result = run_fetcher(mod_name, args)
         return dim_key, mod_name, result, time.time() - t
 
+    from concurrent.futures import TimeoutError as _FutureTimeout
+    # v2.6 · 增量持久化：每完成 N 个 fetcher 写一次 raw_data.json，crash/Ctrl+C 后 --resume 可续
+    from lib.cache import write_task_output as _write_cache
+    INCREMENTAL_SAVE_EVERY = 3
+    completed_count = 0
+    def _persist_progress():
+        raw["dimensions"] = dims
+        try:
+            _write_cache(ticker, "raw_data", raw)
+        except Exception:
+            pass
+
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {pool.submit(_run_one, it): it for it in others}
-        for fut in as_completed(futures):
-            try:
-                dim_key, mod_name, result, elapsed = fut.result()
-                dims[dim_key] = result
-                err = result.get("error") if isinstance(result, dict) else None
-                has_data = bool(result.get("data")) if isinstance(result, dict) else False
-                status = "✗" if err else ("✓" if has_data else "·")
-                tail = f" {err[:60]}" if err else ""
-                print(f"    {status} {dim_key:18} ({elapsed:5.1f}s){tail}")
-            except Exception as e:
-                print(f"    ✗ fetcher crash: {e}")
+        # 整体 5 分钟硬上限；as_completed 内部按 future 自己 result(timeout=)
+        try:
+            for fut in as_completed(futures, timeout=300):
+                item = futures[fut]
+                _, dim_key_pending, _ = item
+                fetcher_timeout = PER_FETCHER_TIMEOUT_OVERRIDES.get(dim_key_pending, DEFAULT_PER_FETCHER_TIMEOUT)
+                try:
+                    dim_key, mod_name, result, elapsed = fut.result(timeout=fetcher_timeout)
+                    dims[dim_key] = result
+                    err = result.get("error") if isinstance(result, dict) else None
+                    has_data = bool(result.get("data")) if isinstance(result, dict) else False
+                    status = "✗" if err else ("✓" if has_data else "·")
+                    tail = f" {err[:60]}" if err else ""
+                    print(f"    {status} {dim_key:18} ({elapsed:5.1f}s){tail}")
+                    completed_count += 1
+                    if completed_count % INCREMENTAL_SAVE_EVERY == 0:
+                        _persist_progress()
+                except _FutureTimeout:
+                    # 单 fetcher 超时 — 标记为超时维度，不影响其他 fetcher
+                    dims[dim_key_pending] = {
+                        "data": {},
+                        "_timeout": True,
+                        "fallback": True,
+                        "error": f"fetcher timeout > {fetcher_timeout}s",
+                        "source": "timeout"
+                    }
+                    print(f"    ⏱  {dim_key_pending:18} (>{fetcher_timeout}s · TIMEOUT · agent 可补抓)")
+                except Exception as e:
+                    dims[dim_key_pending] = {
+                        "data": {},
+                        "fallback": True,
+                        "error": f"{type(e).__name__}: {str(e)[:120]}",
+                        "source": "crash"
+                    }
+                    print(f"    ✗ {dim_key_pending:18} crash: {type(e).__name__}: {str(e)[:60]}")
+        except _FutureTimeout:
+            # 整体 5 分钟超时 — 记录还没完成的 fetcher
+            unfinished = [futures[f] for f in futures if not f.done()]
+            for item in unfinished:
+                _, dim_key_pending, _ = item
+                if dim_key_pending not in dims:
+                    dims[dim_key_pending] = {
+                        "data": {},
+                        "_timeout": True,
+                        "fallback": True,
+                        "error": "wave2 overall timeout > 300s",
+                        "source": "timeout"
+                    }
+            print(f"    ⏱  wave2 整体超时 · 未完成 {len(unfinished)} 个 fetcher 已标记")
     wave2_elapsed = time.time() - wave2_start
     print(f"  [wave 2] done in {wave2_elapsed:.1f}s")
 
@@ -146,12 +274,29 @@ def collect_raw_data(ticker: str, max_workers: int = 6) -> dict:
         except Exception as e:
             return ("similar_stocks", [], str(e))
 
+    # v2.6 · wave3 同样加 60s timeout per fetcher（fund_holders 默认抓全量，可能慢）
+    from concurrent.futures import TimeoutError as _FutureTimeout
     with ThreadPoolExecutor(max_workers=2) as pool:
-        for fut in as_completed([pool.submit(_fund_holders), pool.submit(_similar_stocks)]):
-            key, val, err = fut.result()
-            raw[key] = val
-            status = "✗" if err else "✓"
-            print(f"    {status} {key}: {len(val) if isinstance(val, list) else 'n/a'}")
+        wave3_futures = {pool.submit(_fund_holders): "fund_managers", pool.submit(_similar_stocks): "similar_stocks"}
+        try:
+            for fut in as_completed(wave3_futures, timeout=180):
+                key_pending = wave3_futures[fut]
+                try:
+                    key, val, err = fut.result(timeout=120)
+                    raw[key] = val
+                    status = "✗" if err else "✓"
+                    print(f"    {status} {key}: {len(val) if isinstance(val, list) else 'n/a'}")
+                except _FutureTimeout:
+                    raw[key_pending] = []
+                    print(f"    ⏱  {key_pending} (>120s · TIMEOUT)")
+                except Exception as e:
+                    raw[key_pending] = []
+                    print(f"    ✗ {key_pending} crash: {type(e).__name__}: {str(e)[:60]}")
+        except _FutureTimeout:
+            for f, k in wave3_futures.items():
+                if not f.done() and k not in raw:
+                    raw[k] = []
+            print(f"    ⏱  wave3 overall timeout")
     wave3_elapsed = time.time() - wave3_start
     print(f"  [wave 3] done in {wave3_elapsed:.1f}s")
 
@@ -539,6 +684,324 @@ def generate_panel(dims_scored: dict, raw: dict) -> dict:
     }
 
 
+# ─────────────────────────────────────────────────────────────
+# v2.6.1 · 自动综合各维度 raw_data 字段为可读 commentary
+# 替代旧版 "[脚本占位]" 废话；让直跑模式（无 agent）也能产出有信息量的报告
+# Agent 介入时仍可覆盖（agent_analysis.dim_commentary 优先级最高）
+# ─────────────────────────────────────────────────────────────
+def _auto_summarize_dim(dim_key: str, label: str, dim: dict, score: float) -> str:
+    """Build a one-paragraph commentary from raw_data fields. NEVER returns
+    "[占位]" type strings — either real content or empty."""
+    if not isinstance(dim, dict):
+        return ""
+    data = dim.get("data") or {}
+    if not data:
+        return f"{label}：未拉取到数据（fetcher 失败或返回空）。"
+
+    def _v(*keys, default="—"):
+        for k in keys:
+            v = data.get(k)
+            if v not in (None, "", "—", "-", [], {}):
+                return v
+        return default
+
+    def _join_list(lst, max_n=3, sep="；"):
+        if not isinstance(lst, list) or not lst:
+            return None
+        out = []
+        for x in lst[:max_n]:
+            if isinstance(x, dict):
+                t = x.get("title") or x.get("name") or x.get("date") or str(x)
+                out.append(str(t)[:50])
+            else:
+                out.append(str(x)[:50])
+        return sep.join(out)
+
+    # ─── Per-dim auto summarizer ───
+    if dim_key == "0_basic":
+        return f"{label}：{_v('name')}（{_v('code')}），{_v('industry')} 行业。市值 {_v('market_cap')}，PE {_v('pe_ttm')}，PB {_v('pb')}。"
+
+    if dim_key == "1_financials":
+        roe = _v("roe_latest", "roe")
+        rev_g = _v("revenue_growth_yoy", "revenue_yoy")
+        np_g = _v("net_profit_yoy")
+        margin = _v("net_margin", "gross_margin")
+        return f"{label}：ROE {roe}，营收同比 {rev_g}，净利同比 {np_g}，净利率 {margin}。综合得分 {score}/10。"
+
+    if dim_key == "2_kline":
+        stage = _v("stage", "wyckoff_stage")
+        ma = _v("ma_align", "trend")
+        macd = _v("macd")
+        return f"{label}：{stage} · 均线 {ma} · MACD {macd}。"
+
+    if dim_key == "3_macro":
+        return (f"{label}：利率周期 {_v('rate_cycle')}；汇率 {_v('fx_trend')}；"
+                f"地缘 {_v('geo_risk')}；大宗商品 {_v('commodity', 'commodity_trend')}。"
+                f"得分 {score}/10。")
+
+    if dim_key == "4_peers":
+        rank = _v("rank")
+        peer_table = data.get("peer_table") or []
+        ind = _v("industry")
+        peers_str = _join_list([p.get("name") for p in peer_table if isinstance(p, dict) and not p.get("is_self")][:5], max_n=5, sep="、")
+        return f"{label}：{ind} 行业，{rank}{('，主要同行：' + peers_str) if peers_str else ''}。得分 {score}/10。"
+
+    if dim_key == "5_chain":
+        return f"{label}：上游 {_v('upstream')}；下游 {_v('downstream')}；客户集中度 {_v('client_concentration')}。"
+
+    if dim_key == "6_research":
+        rep_count = _v("report_count", "n_reports")
+        target = _v("avg_target_price", "target_price")
+        rating = _v("consensus_rating", "rating")
+        return f"{label}：近期券商研报 {rep_count} 篇，一致评级 {rating}，目标价均值 {target}。"
+
+    if dim_key == "7_industry":
+        ind_pe = _v("industry_pe_weighted") or (data.get("cninfo_metrics") or {}).get("industry_pe_weighted")
+        ind_count = _v("total_companies") or (data.get("cninfo_metrics") or {}).get("company_count")
+        growth = _v("growth")
+        return f"{label}：所属 {_v('industry')} · 行业 PE 加权 {ind_pe} · 上市公司数 {ind_count} · 增速 {growth}。"
+
+    if dim_key == "8_materials":
+        core = _v("core_material")
+        trend = _v("price_trend")
+        cost = _v("cost_share")
+        return f"{label}：核心原料 {core}；近期价格走势 {trend}；占成本比例 {cost}。"
+
+    if dim_key == "9_futures":
+        contract = _v("linked_contract")
+        ftrend = _v("contract_trend")
+        return f"{label}：关联合约 {contract}；近期走势 {ftrend}；{_v('note', default='')}。"
+
+    if dim_key == "10_valuation":
+        pe_q = _v("pe_quantile_5y", "pe_quantile")
+        pb_q = _v("pb_quantile_5y", "pb_quantile")
+        return f"{label}：PE 5 年分位 {pe_q}，PB 5 年分位 {pb_q}。得分 {score}/10。"
+
+    if dim_key == "11_governance":
+        ctrl = _v("actual_controller")
+        recent = _v("recent_changes", "recent_holdings_change")
+        return f"{label}：实控人 {ctrl}；近期变动 {recent}。"
+
+    if dim_key == "12_capital_flow":
+        north = _v("north_holding_pct", "north_change_5d", default=None)
+        margin = _v("margin_balance", default=None)
+        if north or margin:
+            return f"{label}：北向持股 {north or '—'}；融资余额 {margin or '—'}。"
+        return f"{label}：{_v('_note', default='资金面数据有限')}。"
+
+    if dim_key == "13_policy":
+        snippets = data.get("snippets") or {}
+        non_empty = {k: v for k, v in snippets.items() if v}
+        if non_empty:
+            preview = "；".join(f"{k}: {len(v) if isinstance(v, list) else 1} 条" for k, v in non_empty.items())
+            return f"{label}：{_v('industry', default='本行业')} {_v('year', default='')} 年政策检索：{preview}。"
+        return f"{label}：{_v('industry', default='本行业')} 政策搜索未命中具体内容（建议 web_search 补抓）。"
+
+    if dim_key == "14_moat":
+        scores = data.get("scores") or {}
+        total = sum(scores.values()) if scores else None
+        if total is not None:
+            return f"{label}：四力评分 无形资产 {scores.get('intangible')}/10、转换成本 {scores.get('switching')}/10、网络效应 {scores.get('network')}/10、规模 {scores.get('scale')}/10 · 综合 {total}/40。"
+        return f"{label}：评估数据有限，得分 {score}/10。"
+
+    if dim_key == "15_events":
+        timeline = data.get("event_timeline") or []
+        recent_news = data.get("recent_news") or []
+        if timeline:
+            head = "；".join([str(t)[:60] for t in timeline[:3]])
+            return f"{label}：近期事件 {len(timeline)} 条，含：{head}。"
+        if recent_news:
+            head = "；".join([(n.get("title") or "")[:60] for n in recent_news[:3]])
+            return f"{label}：近期新闻 {len(recent_news)} 条，含：{head}。"
+        return f"{label}：暂无显著事件（fetcher 返回空）。"
+
+    if dim_key == "16_lhb":
+        n = _v("recent_lhb_count", "n_lhb_30d", default=None)
+        seats = data.get("recent_seats") or data.get("top_seats") or []
+        if n or seats:
+            seat_str = "、".join([s.get("name", "") for s in seats[:3] if isinstance(s, dict)]) if seats else ""
+            return f"{label}：近 30 天上榜 {n or '—'} 次{('，主要席位：' + seat_str) if seat_str else ''}。"
+        return f"{label}：近期未上龙虎榜或非 A 股。"
+
+    if dim_key == "17_sentiment":
+        hot = _v("hot_rank", "hot_score")
+        senti = _v("sentiment_label", "sentiment")
+        return f"{label}：热度 {hot}；情绪 {senti}。"
+
+    if dim_key == "18_trap":
+        level = _v("trap_level", "level")
+        n_signals = _v("hit_signals_count", default=0)
+        rec = _v("recommendation")
+        return f"{label}：{level}；命中信号 {n_signals} 条；建议：{rec}。"
+
+    if dim_key == "19_contests":
+        cnt = _v("contests_count", default=None)
+        if cnt:
+            return f"{label}：实盘比赛上榜 {cnt} 次。"
+        return f"{label}：暂未上榜实盘比赛。"
+
+    # Default: just enumerate top fields
+    items = []
+    for k, v in list(data.items())[:5]:
+        if v not in (None, "", "—", "-", [], {}) and not str(k).startswith("_"):
+            items.append(f"{k}={str(v)[:30]}")
+    return f"{label}：{'、'.join(items) if items else '无数据'}。" if items else ""
+
+
+def _autofill_qualitative_via_mx(raw: dict, ticker: str) -> None:
+    """v2.6.1 · 自动补齐 6 个定性维度的空字段（in-place 修改 raw['dimensions']）.
+
+    优先级：MX 妙想 API → ddgs WebSearch → 显式标记 autofill_failed。
+    适用场景：直跑模式（无 agent 介入），fetcher 拿到空数据时不能让报告也空。
+    """
+    try:
+        from lib.mx_api import MXClient
+    except ImportError:
+        MXClient = None
+    try:
+        from lib.web_search import search as _ws_search
+    except ImportError:
+        _ws_search = None
+
+    client = MXClient() if MXClient else None
+    mx_ok = client is not None and client.available
+    if not mx_ok and not _ws_search:
+        print("   ⚠️ MX_APIKEY 未设置且 ddgs 不可用，跳过自动兜底")
+        return
+
+    dims = raw.get("dimensions", {})
+    basic = (dims.get("0_basic") or {}).get("data") or {}
+    name = basic.get("name") or ticker
+    industry = basic.get("industry") or "综合"
+    code_raw = ticker.split(".")[0] if "." in ticker else ticker
+
+    def _is_default_or_empty(v) -> bool:
+        """True if value is missing OR a generic-default placeholder."""
+        if v in (None, "", "—", "-", [], {}, "n/a", "N/A"):
+            return True
+        s = str(v)
+        # 这些都是 fetcher 的默认 fallback 字符串，没真实信息量
+        if any(kw in s for kw in ["中性（", "中性(", "未拉取", "未命中", "无直接关联"]):
+            return True
+        return False
+
+    # 6 个定性维度的"空判定" + MX query 模板（v2.6.1 加严：默认值也算空）
+    targets = [
+        ("3_macro",     lambda d: all(_is_default_or_empty(d.get(k)) for k in ("rate_cycle","fx_trend","geo_risk","commodity")),
+                        lambda: f"{industry} 2026 宏观环境 利率周期 汇率 大宗商品 行业影响"),
+        ("7_industry",  lambda d: _is_default_or_empty(d.get("growth")) and not (d.get("cninfo_metrics") or {}).get("industry_pe_weighted"),
+                        lambda: f"{industry} 2026 行业增速 TAM 市场规模 渗透率"),
+        ("8_materials", lambda d: _is_default_or_empty(d.get("core_material")),
+                        lambda: f"{name} {code_raw} 主营业务 主要原材料 成本构成"),
+        ("9_futures",   lambda d: _is_default_or_empty(d.get("linked_contract")) or "无直接" in str(d.get("linked_contract","")),
+                        lambda: f"{industry} 行业 上下游 期货品种 套保 大宗"),
+        ("13_policy",   lambda d: not any((d.get("snippets") or {}).get(k) for k in ("policy_dir","subsidy","monitoring","anti_trust")),
+                        lambda: f"{industry} 2026 国家政策 监管动态 补贴 税收 影响"),
+        ("15_events",   lambda d: not d.get("event_timeline") and not d.get("recent_news") and not d.get("recent_notices"),
+                        lambda: f"{name} {code_raw} 最新公告 重大事件 业绩 合同"),
+    ]
+    fixed_count = 0
+    skipped_full = 0
+    failed_count = 0
+    for dim_key, is_empty_fn, query_fn in targets:
+        dim = dims.get(dim_key) or {}
+        data = dim.get("data") or {}
+        try:
+            if not is_empty_fn(data):
+                skipped_full += 1
+                continue  # 该维度已有真实数据
+        except Exception:
+            skipped_full += 1
+            continue
+
+        query = query_fn()
+        text = ""
+        source_used = None
+
+        # 优先 MX
+        if mx_ok:
+            try:
+                r = client.query(query)
+                text = _extract_mx_text(r)
+                if text:
+                    source_used = "mx_api"
+            except Exception:
+                pass
+
+        # 回退 ddgs WebSearch
+        if not text and _ws_search:
+            try:
+                results = _ws_search(query, max_results=3) or []
+                snippets = []
+                for r in results[:3]:
+                    if isinstance(r, dict):
+                        title = (r.get("title") or "").strip()
+                        body = (r.get("body") or "").strip()
+                        if title or body:
+                            snippets.append(f"{title} — {body[:80]}".strip(" —"))
+                text = "；".join(snippets)[:300]
+                if text:
+                    source_used = "ddgs"
+            except Exception:
+                pass
+
+        if text:
+            data.setdefault("_autofill", {})
+            data["_autofill"]["query"] = query
+            data["_autofill"]["snippet"] = text
+            data["_autofill"]["source"] = source_used
+            # 把内容塞到对应字段，方便 _auto_summarize_dim 摘要
+            if dim_key == "3_macro":
+                data["rate_cycle"] = (text[:80] + "…") if len(text) > 80 else text
+            elif dim_key == "7_industry":
+                data["growth"] = (text[:80] + "…") if len(text) > 80 else text
+            elif dim_key == "8_materials":
+                data["core_material"] = (text[:60] + "…") if len(text) > 60 else text
+            elif dim_key == "9_futures":
+                data["contract_trend"] = (text[:60] + "…") if len(text) > 60 else text
+            elif dim_key == "13_policy":
+                snippets = data.setdefault("snippets", {})
+                snippets.setdefault("policy_dir", []).append({"title": text[:120], "url": "", "source": source_used})
+            elif dim_key == "15_events":
+                data["event_timeline"] = [text[:120]]
+            dims[dim_key] = {"ticker": ticker, "data": data,
+                             "source": (dim.get("source", "") + f"+autofill:{source_used}").lstrip("+"),
+                             "fallback": True}
+            fixed_count += 1
+            print(f"   ✓ {dim_key:14s} via {source_used}: {text[:60]}{'…' if len(text)>60 else ''}")
+        else:
+            data["_autofill_failed"] = {"query": query, "reason": "MX/ddgs 都没有返回内容"}
+            dims[dim_key] = {"ticker": ticker, "data": data,
+                             "source": (dim.get("source", "") + "+autofill_failed").lstrip("+"),
+                             "fallback": True}
+            failed_count += 1
+            print(f"   ⚠️ {dim_key:14s} 兜底失败 · agent 应主动 web search 补抓")
+
+    print(f"   合计 · 充足 {skipped_full} · 兜底成功 {fixed_count} · 失败 {failed_count}（共 6 维）")
+
+
+def _extract_mx_text(result: dict) -> str:
+    """Pull most readable text from MX query response.
+    First tries dataTableDTOList[].title + entityName; else returns empty."""
+    if not isinstance(result, dict) or result.get("error"):
+        return ""
+    data = result.get("data") or {}
+    inner = data.get("data") or {}
+    sr = inner.get("searchDataResultDTO") or {}
+    dto_list = sr.get("dataTableDTOList") or []
+    if not dto_list:
+        # Try inner.entityName as last resort
+        return str(inner.get("entityName") or "")[:200]
+    parts = []
+    for dto in dto_list[:2]:
+        if not isinstance(dto, dict):
+            continue
+        title = dto.get("title") or dto.get("entityName") or ""
+        if title:
+            parts.append(str(title)[:120])
+    return "；".join(parts)[:300] if parts else ""
+
+
 def generate_synthesis(raw: dict, dims_scored: dict, panel: dict, agent_analysis: dict | None = None) -> dict:
     """Generate synthesis — merges agent_analysis.json if provided.
 
@@ -569,34 +1032,38 @@ def generate_synthesis(raw: dict, dims_scored: dict, panel: dict, agent_analysis
     # Pick bull and bear for great divide
     # CRITICAL: must pick from ACTUALLY bullish/bearish investors, never misattribute
     investors = panel.get("investors", [])
-    inv_by_score = sorted(investors, key=lambda x: -x.get("score", 0))
 
-    # Bull = highest score among genuinely bullish, or highest score overall if no bullish
-    bulls = [i for i in investors if i["signal"] == "bullish"]
-    bears = [i for i in investors if i["signal"] == "bearish"]
-    neutrals = [i for i in investors if i["signal"] == "neutral"]
+    # v2.6 · 防御性 panel 排序 (fix bug #5: "最看空 27 vs 下面 0 不一致")
+    # 非 Claude LLM 可能写出 signal=bullish 但 score=5 这种自相矛盾输出。
+    # 旧逻辑按 signal 先分组再选 → 实际可见的最低分(neutral/skip 里 0 分的)反而没被选为 bear。
+    # 新逻辑：先排除 skip 和明显异常（score=0 通常是空数据），然后按 score 排序，
+    #        bull = 最高分 · bear = 最低分。signal 仅作辅助检查。
+    eligible = [
+        i for i in investors
+        if i.get("signal") != "skip"
+        and i.get("score", 0) > 0  # 0 分通常是 fail_msg 幻觉，剔除
+    ]
+    if not eligible:
+        eligible = [i for i in investors if i.get("signal") != "skip"] or investors
 
-    if bulls:
-        bull = sorted(bulls, key=lambda x: -x.get("score", 0))[0]
-    elif neutrals:
-        # No bullish → pick highest-scoring neutral as "relative bull"
-        bull = sorted(neutrals, key=lambda x: -x.get("score", 0))[0]
-    else:
-        # Everyone is bearish → pick least bearish
-        bull = inv_by_score[0]
-
-    if bears:
-        bear = sorted(bears, key=lambda x: x.get("score", 100))[0]
-    elif neutrals:
-        # No bearish → pick lowest-scoring neutral as "relative bear"
-        bear = sorted(neutrals, key=lambda x: x.get("score", 100))[0]
-    else:
-        # Everyone is bullish → pick least bullish
-        bear = inv_by_score[-1]
+    inv_by_score = sorted(eligible, key=lambda x: -x.get("score", 0))
+    bull = inv_by_score[0] if inv_by_score else (investors[0] if investors else {})
+    bear = inv_by_score[-1] if inv_by_score else (investors[-1] if investors else {})
 
     # Safety: bull and bear must be different investors
-    if bull["investor_id"] == bear["investor_id"] and len(investors) > 1:
-        bear = inv_by_score[-1] if bull == inv_by_score[0] else inv_by_score[0]
+    if bull.get("investor_id") == bear.get("investor_id") and len(inv_by_score) > 1:
+        bear = inv_by_score[-2]
+
+    # v2.6 · Sanity warnings: signal vs score 矛盾时打印（不阻断流程）
+    def _check_signal_score(inv: dict, role: str) -> None:
+        sig = inv.get("signal", "")
+        sc = inv.get("score", 50)
+        if role == "bull" and sig == "bearish":
+            print(f"   ⚠️ Top bull '{inv.get('name')}' signal=bearish but score={sc} → 数据可能错乱")
+        if role == "bear" and sig == "bullish":
+            print(f"   ⚠️ Bottom bear '{inv.get('name')}' signal=bullish but score={sc} → 数据可能错乱")
+    _check_signal_score(bull, "bull")
+    _check_signal_score(bear, "bear")
 
     # Build debate rounds — use actual headline + reasoning from evaluator
     bull_headline = bull.get("headline", bull.get("comment", ""))
@@ -717,19 +1184,32 @@ def generate_synthesis(raw: dict, dims_scored: dict, panel: dict, agent_analysis
     agent_core_conclusion = narrative_override.get("core_conclusion") or ""
     core_conclusion = agent_core_conclusion or f"{name} · {int(overall)} 分 · {verdict_label}。51 位大佬里 {panel['signal_distribution']['bullish']} 人看多，YTD {ytd_return}。{punchline}"
 
-    # v2.2 · dim_commentary: prefer agent-written, fallback to stub
+    # v2.2 · dim_commentary: prefer agent-written, fallback to AUTO-SUMMARY (v2.6.1)
+    # 关键修复：原 fallback 只生成 "[脚本占位]" 字符串，导致直跑模式下报告里
+    # 5/6 定性维度是 missing/占位文字。新版直接把 raw_data 字段综合成实际中文。
     agent_dim_commentary = ag.get("dim_commentary") or {}
     dim_commentary_final: dict[str, str] = {}
     dim_labels = {
         "0_basic": "基础信息",
         "1_financials": "财报",
         "2_kline": "K线技术面",
-        "10_valuation": "估值分位",
+        "3_macro": "宏观环境",
         "4_peers": "同行对比",
         "5_chain": "产业链",
+        "6_research": "券商研报",
         "7_industry": "行业景气",
+        "8_materials": "原材料",
+        "9_futures": "期货关联",
+        "10_valuation": "估值分位",
+        "11_governance": "治理/减持",
+        "12_capital_flow": "资金面",
+        "13_policy": "政策与监管",
         "14_moat": "护城河",
+        "15_events": "事件驱动",
+        "16_lhb": "龙虎榜",
+        "17_sentiment": "舆情",
         "18_trap": "杀猪盘",
+        "19_contests": "实盘比赛",
     }
     for dim_key, label in dim_labels.items():
         # Agent-written commentary takes priority
@@ -738,9 +1218,10 @@ def generate_synthesis(raw: dict, dims_scored: dict, panel: dict, agent_analysis
         else:
             dim = (raw.get("dimensions", {}).get(dim_key) or {})
             score_info = dims_scored.get("dimensions", {}).get(dim_key) or {}
-            if dim.get("data"):
-                score = score_info.get("score", 0)
-                dim_commentary_final[dim_key] = f"[脚本占位] {label} 得分 {score}/10 · 需 Claude 补充定性评语"
+            score = score_info.get("score", 0)
+            auto = _auto_summarize_dim(dim_key, label, dim, score)
+            if auto:
+                dim_commentary_final[dim_key] = auto
 
     return {
         "ticker": raw["ticker"],
@@ -921,6 +1402,16 @@ def stage1(ticker: str) -> dict:
         print(f"   HTML 报告会对这些字段显示 ⚠️ 橙色徽章而非假数据")
         print(f"{'▓' * 50}")
 
+    # v2.6.1 · 自动兜底补齐 6 个定性维度的空字段（不等 agent）
+    # 论坛反馈：直跑模式下"宏观/政策/原材料"这些经常空，agent 没介入就出空报告
+    # 优先 MX API，失败 fallback ddgs；都失败时显式标 _autofill_failed
+    print("\n🤖 v2.6.1 · 自动兜底补齐定性维度空字段（MX → ddgs）...")
+    try:
+        _autofill_qualitative_via_mx(raw, ti.full)
+        write_task_output(ti.full, "raw_data", raw)  # 持久化补齐后的数据
+    except Exception as _af_e:
+        print(f"   ⚠️ 自动兜底异常: {type(_af_e).__name__}: {str(_af_e)[:120]}")
+
     print("\n🏛  Task 1.5 · 机构级财务建模 (Dims 20-22)")
     from compute_deep_methods import compute_dim_20, compute_dim_21, compute_dim_22
     _features_pre = extract_features(raw, raw.get("dimensions", {}))
@@ -999,6 +1490,32 @@ def stage2(ticker: str) -> str:
 
     # v2.2 · Read agent_analysis.json — the agent's written-back analysis
     agent_analysis = read_task_output(ti.full, "agent_analysis")
+
+    # v2.6 · 校验 agent_analysis schema（特别针对非 Claude 模型的输出）
+    if agent_analysis:
+        try:
+            from lib.agent_analysis_validator import validate as _validate_aa, format_issues as _fmt_aa
+            issues = _validate_aa(agent_analysis)
+            errs = [i for i in issues if i.severity == "error"]
+            if issues:
+                print("\n" + _fmt_aa(issues))
+                # 写错误清单 JSON 给 agent 复盘
+                from pathlib import Path as _Path
+                err_path = _Path(".cache") / ti.full / "_agent_analysis_errors.json"
+                err_path.parent.mkdir(parents=True, exist_ok=True)
+                err_path.write_text(
+                    __import__("json").dumps(
+                        [{"severity": i.severity, "field": i.field, "message": i.message, "suggestion": i.suggestion} for i in issues],
+                        ensure_ascii=False, indent=2
+                    ),
+                    encoding="utf-8"
+                )
+                if errs:
+                    print(f"   → 详细 issue 写入 {err_path}")
+                    print(f"   → {len(errs)} 条结构性错误，agent 应修正后重跑 stage2")
+        except Exception as _ve:
+            print(f"   ⚠️ schema 校验跳过: {_ve}")
+
     if agent_analysis and agent_analysis.get("agent_reviewed"):
         print(f"\n🧠 Agent 分析已加载 · agent_analysis.json")
         ag_dc = agent_analysis.get("dim_commentary") or {}

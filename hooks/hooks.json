@@ -6,7 +6,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" session-start",
+            "_v2.6_note": "改为直接调用 session-start 脚本（去掉 polyglot run-hook.cmd 中间层），论坛反馈过 .cmd 在 macOS Claude Code 上权限/格式问题",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/session-start\"",
             "async": false
           }
         ]

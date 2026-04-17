@@ -81,6 +81,12 @@ if [ "$SUCCESS" -eq 0 ]; then
     exit 1
 fi
 
+# v2.6 · 确保 hooks 脚本有可执行权限（论坛报告 macOS Claude plugin 不能执行）
+if [ -d "hooks" ]; then
+    chmod +x hooks/session-start hooks/run-hook.cmd 2>/dev/null
+    echo "✓ hooks 脚本可执行权限已设置"
+fi
+
 # 验证
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
