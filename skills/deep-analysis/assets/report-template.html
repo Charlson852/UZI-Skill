@@ -2254,6 +2254,183 @@ footer strong { color: var(--text-dim); }
   .fighter .confidence { font-size: 64px; }
   .jury-seats { grid-template-columns: repeat(4, 1fr); }
 }
+
+/* ═══ v2.10 · Segmental Revenue Build-Up 分业务建模块 ═══ */
+.segmental-section {
+  background: linear-gradient(135deg, rgba(8,145,178,0.04) 0%, rgba(217,119,6,0.04) 100%);
+  border: 1px solid rgba(8,145,178,0.15);
+  border-radius: 12px;
+  padding: 24px;
+  margin: 32px 0;
+}
+.seg-section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 16px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid rgba(8,145,178,0.12);
+}
+.seg-section-title .section-tag {
+  display: inline-block;
+  font-size: 10px;
+  letter-spacing: 2px;
+  color: #0891b2;
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+.seg-section-title h3 {
+  margin: 0;
+  font-size: 20px;
+  color: #0f172a;
+  font-weight: 700;
+}
+.seg-badges { display: flex; gap: 8px; flex-wrap: wrap; }
+
+.seg-thesis {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+  padding: 12px 16px;
+  background: rgba(255,255,255,0.6);
+  border-left: 3px solid #0891b2;
+  border-radius: 6px;
+  margin-bottom: 20px;
+}
+.seg-thesis .lbl {
+  font-size: 10px;
+  letter-spacing: 2px;
+  color: #0891b2;
+  font-weight: 700;
+  white-space: nowrap;
+  padding-top: 2px;
+}
+.seg-thesis .txt { font-size: 14px; color: #1e293b; line-height: 1.55; }
+
+.seg-charts-grid {
+  display: grid;
+  grid-template-columns: minmax(220px, 240px) 1fr;
+  gap: 20px;
+  align-items: start;
+  margin-bottom: 20px;
+}
+.seg-chart-cell {
+  background: rgba(255,255,255,0.5);
+  border-radius: 8px;
+  padding: 14px;
+}
+.seg-chart-title {
+  font-size: 11px;
+  color: #64748b;
+  margin-bottom: 8px;
+  letter-spacing: 1px;
+}
+
+.seg-cards-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 14px;
+}
+.seg-card {
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 14px 16px;
+}
+.seg-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+.seg-icon { font-size: 18px; }
+.seg-name { font-size: 15px; font-weight: 700; color: #0f172a; }
+.seg-tag {
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-weight: 600;
+}
+.seg-share {
+  margin-left: auto;
+  font-size: 13px;
+  color: #64748b;
+  font-weight: 600;
+}
+.seg-rev {
+  font-size: 12px;
+  color: #64748b;
+  margin-bottom: 10px;
+}
+.seg-rev strong {
+  font-size: 18px;
+  color: #0f172a;
+  font-weight: 700;
+}
+.seg-drivers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+.seg-driver {
+  font-size: 11px;
+  padding: 3px 8px;
+  background: #f1f5f9;
+  border-radius: 4px;
+  color: #334155;
+}
+.seg-driver.muted { color: #94a3b8; font-style: italic; }
+.seg-cagr {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+  margin-top: 6px;
+}
+.cagr-cell {
+  text-align: center;
+  padding: 8px 4px;
+  border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.cagr-cell .lbl { font-size: 9px; letter-spacing: 1px; font-weight: 700; opacity: 0.75; }
+.cagr-cell .val { font-size: 15px; font-weight: 700; }
+.cagr-cell.bull { background: rgba(5,150,105,0.08); color: #059669; }
+.cagr-cell.base { background: rgba(217,119,6,0.08); color: #d97706; }
+.cagr-cell.bear { background: rgba(220,38,38,0.08); color: #dc2626; }
+.seg-note {
+  margin-top: 10px;
+  font-size: 11px;
+  color: #64748b;
+  font-style: italic;
+  padding: 6px 10px;
+  background: rgba(251,191,36,0.08);
+  border-radius: 4px;
+}
+.seg-warnings {
+  margin-top: 14px;
+  font-size: 11px;
+  color: #d97706;
+  padding: 8px 12px;
+  background: rgba(251,191,36,0.1);
+  border-radius: 4px;
+  border-left: 3px solid #d97706;
+}
+.seg-source {
+  margin-top: 10px;
+  font-size: 10px;
+  color: #94a3b8;
+  text-align: center;
+  letter-spacing: 0.5px;
+}
+@media (max-width: 800px) {
+  .seg-charts-grid { grid-template-columns: 1fr; }
+}
 </style>
 </head>
 <body>

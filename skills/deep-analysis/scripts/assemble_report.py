@@ -2072,6 +2072,342 @@ def trap_color_emoji(level: str) -> tuple[str, str]:
 # v2.0 · Institutional Modeling Renderers (dim 20 / 21 / 22)
 # ═══════════════════════════════════════════════════════════════
 
+def _render_segmental_block(ticker: str) -> str:
+    """v2.10 · 分业务收入模型块 (如果 agent 跑过 /segmental-model 则展示).
+
+    数据源: .cache/<ticker>/segmental_model.json (agent 填) +
+            .cache/<ticker>/segmental_validation.json (脚本校验)
+
+    视觉:
+      ┌─ 核心叙事 + 对账徽章 + Base 3Y 总增速 ─────────────┐
+      ├─ [Donut: 当前营收构成] · [Line: 历史+3情景预测]  ─┤
+      └─ [卡片列表: 每 segment driver + thesis + 3 CAGR] ─┘
+    """
+    from lib.cache import read_task_output
+    model = read_task_output(ticker, "segmental_model")
+    if not model or not model.get("segments"):
+        return ""  # 未跑 → 整块不显示
+
+    validation = read_task_output(ticker, "segmental_validation") or {}
+    summary = validation.get("summary") or {}
+
+    segments = model.get("segments") or []
+    thesis = model.get("core_thesis") or model.get("thesis") or "—"
+    total_rev = model.get("total_revenue_latest_yi", 0)
+    rev_hist = model.get("total_revenue_history_yi") or []
+    currency = model.get("currency", "CNY")
+
+    # ═══ 对账徽章 ═══
+    gap = summary.get("reconciliation_gap_pct", 0)
+    base_3y = summary.get("base_3y_total_growth_pct", 0)
+    passed = validation.get("passed", True)
+    badge_color = "#059669" if passed and gap < 5 else ("#d97706" if passed else "#dc2626")
+    badge_icon = "✓" if passed else "✗"
+    badge_html = (
+        f'<span style="background:{badge_color};color:#fff;padding:4px 10px;'
+        f'border-radius:999px;font-size:11px;font-weight:700;letter-spacing:1px">'
+        f'{badge_icon} 对账 gap {gap:.1f}%</span>'
+    )
+    growth_badge = (
+        f'<span style="background:#0891b2;color:#fff;padding:4px 10px;'
+        f'border-radius:999px;font-size:11px;font-weight:700">'
+        f'📈 Base 3Y 总增速 {base_3y:+.1f}%</span>'
+    )
+
+    # ═══ Donut: 当前营收构成 ═══
+    donut_svg = _svg_segment_donut(segments, total_rev, currency, size=220)
+
+    # ═══ Line chart: 历史 + 3 情景预测 ═══
+    line_svg = _svg_segment_projection(segments, rev_hist, width=420, height=220)
+
+    # ═══ 各 segment driver 卡片 ═══
+    segment_cards = ""
+    THESIS_ICONS = {
+        "cash_cow": ("💰", "#059669", "稳定现金牛"),
+        "growth_engine": ("🚀", "#0891b2", "成长引擎"),
+        "declining": ("📉", "#dc2626", "衰退中"),
+        "cyclical": ("🔄", "#d97706", "周期波动"),
+        "turnaround": ("🔁", "#7c3aed", "困境反转"),
+        "stable_cash_cow": ("💰", "#059669", "稳定现金牛"),
+        "": ("❓", "#94a3b8", "未分类"),
+    }
+    for i, s in enumerate(segments, 1):
+        name = _safe(s.get("name"), f"分段{i}")
+        rev = s.get("latest_revenue_yi", 0)
+        share = s.get("latest_share_pct", 0)
+        drivers = s.get("drivers") or []
+        tag = s.get("thesis_tag") or ""
+        bull = s.get("bull_growth_3y_cagr")
+        base = s.get("base_growth_3y_cagr")
+        bear = s.get("bear_growth_3y_cagr")
+        note = s.get("agent_note") or ""
+
+        icon, color, tag_cn = THESIS_ICONS.get(tag, THESIS_ICONS[""])
+        drivers_html = "".join(
+            f'<span class="seg-driver">{d}</span>' for d in drivers[:5]
+        ) or '<span class="seg-driver muted">（agent 未填 drivers）</span>'
+
+        cagr_row = ""
+        if bull is not None and base is not None and bear is not None:
+            cagr_row = (
+                f'<div class="seg-cagr">'
+                f'<div class="cagr-cell bull"><span class="lbl">Bull</span><span class="val">{bull:+.1f}%</span></div>'
+                f'<div class="cagr-cell base"><span class="lbl">Base</span><span class="val">{base:+.1f}%</span></div>'
+                f'<div class="cagr-cell bear"><span class="lbl">Bear</span><span class="val">{bear:+.1f}%</span></div>'
+                f'</div>'
+            )
+        else:
+            cagr_row = '<div class="muted" style="font-size:11px">（agent 未填 3 情景 CAGR）</div>'
+
+        note_html = f'<div class="seg-note">💡 {note}</div>' if note else ""
+
+        segment_cards += (
+            f'<div class="seg-card">'
+            f'  <div class="seg-head">'
+            f'    <span class="seg-icon" style="color:{color}">{icon}</span>'
+            f'    <span class="seg-name">{name}</span>'
+            f'    <span class="seg-tag" style="background:{color}20;color:{color}">{tag_cn}</span>'
+            f'    <span class="seg-share">{share:.1f}%</span>'
+            f'  </div>'
+            f'  <div class="seg-rev">{currency} <strong>{rev:,.1f}</strong> 亿</div>'
+            f'  <div class="seg-drivers">{drivers_html}</div>'
+            f'  {cagr_row}'
+            f'  {note_html}'
+            f'</div>'
+        )
+
+    # ═══ 溯源信息（底部小字） ═══
+    source_notes = model.get("source_notes") or []
+    src_line = " · ".join(str(n) for n in source_notes)
+    warnings = validation.get("warnings") or []
+    warn_line = ""
+    if warnings:
+        warn_line = (
+            '<div class="seg-warnings">⚠ '
+            + " · ".join(str(w) for w in warnings[:3])
+            + '</div>'
+        )
+
+    return f'''
+<div class="segmental-section">
+  <div class="seg-section-header">
+    <div class="seg-section-title">
+      <div class="section-tag">SEGMENTAL · 分业务建模</div>
+      <h3>{_safe(model.get("name"))} · 分业务收入 Build-Up</h3>
+    </div>
+    <div class="seg-badges">{badge_html} {growth_badge}</div>
+  </div>
+
+  <div class="seg-thesis">
+    <span class="lbl">CORE THESIS</span>
+    <span class="txt">{thesis}</span>
+  </div>
+
+  <div class="seg-charts-grid">
+    <div class="seg-chart-cell">
+      <div class="seg-chart-title">当前营收构成 · {currency} {total_rev:,.1f} 亿</div>
+      {donut_svg}
+    </div>
+    <div class="seg-chart-cell">
+      <div class="seg-chart-title">历史 + 3 情景预测</div>
+      {line_svg}
+    </div>
+  </div>
+
+  <div class="seg-cards-grid">{segment_cards}</div>
+
+  {warn_line}
+  <div class="seg-source">数据来源 · {src_line}</div>
+</div>
+'''
+
+
+def _svg_segment_donut(segments: list, total_rev: float, currency: str, size: int = 220) -> str:
+    """Donut chart of revenue share per segment."""
+    if not segments:
+        return f'<svg width="{size}" height="{size}"></svg>'
+    PALETTE = ["#0891b2", "#d97706", "#059669", "#7c3aed", "#dc2626", "#db2777", "#64748b"]
+    cx = cy = size // 2
+    r_outer = size // 2 - 12
+    r_inner = r_outer - 28
+
+    total_share = sum(s.get("latest_share_pct", 0) or 0 for s in segments) or 100
+    paths = []
+    labels = []
+    start_angle = -90  # 12 点方向开始
+
+    import math
+    for i, s in enumerate(segments):
+        share = s.get("latest_share_pct", 0) or 0
+        angle = share / total_share * 360
+        end_angle = start_angle + angle
+        color = PALETTE[i % len(PALETTE)]
+
+        # Arc path
+        rad_start = math.radians(start_angle)
+        rad_end = math.radians(end_angle)
+        x1 = cx + r_outer * math.cos(rad_start)
+        y1 = cy + r_outer * math.sin(rad_start)
+        x2 = cx + r_outer * math.cos(rad_end)
+        y2 = cy + r_outer * math.sin(rad_end)
+        x3 = cx + r_inner * math.cos(rad_end)
+        y3 = cy + r_inner * math.sin(rad_end)
+        x4 = cx + r_inner * math.cos(rad_start)
+        y4 = cy + r_inner * math.sin(rad_start)
+        large = 1 if angle > 180 else 0
+        path = (
+            f'M {x1:.1f} {y1:.1f} '
+            f'A {r_outer} {r_outer} 0 {large} 1 {x2:.1f} {y2:.1f} '
+            f'L {x3:.1f} {y3:.1f} '
+            f'A {r_inner} {r_inner} 0 {large} 0 {x4:.1f} {y4:.1f} Z'
+        )
+        paths.append(f'<path d="{path}" fill="{color}" opacity="0.88"><title>{s.get("name")} · {share:.1f}%</title></path>')
+
+        # Label (only if >= 5%)
+        if share >= 5:
+            mid = math.radians((start_angle + end_angle) / 2)
+            lx = cx + (r_outer + 8) * math.cos(mid)
+            ly = cy + (r_outer + 8) * math.sin(mid)
+            anchor = "start" if math.cos(mid) > 0.1 else ("end" if math.cos(mid) < -0.1 else "middle")
+            labels.append(
+                f'<text x="{lx:.1f}" y="{ly:.1f}" text-anchor="{anchor}" '
+                f'font-size="10" fill="#374151" font-weight="600">{s.get("name")[:8]}</text>'
+            )
+        start_angle = end_angle
+
+    center_text = (
+        f'<text x="{cx}" y="{cy - 4}" text-anchor="middle" font-size="13" fill="#111" font-weight="700">{len(segments)} 条</text>'
+        f'<text x="{cx}" y="{cy + 12}" text-anchor="middle" font-size="10" fill="#64748b">业务线</text>'
+    )
+
+    return (
+        f'<svg width="{size}" height="{size}" viewBox="0 0 {size} {size}">'
+        + "".join(paths)
+        + center_text
+        + "".join(labels)
+        + '</svg>'
+    )
+
+
+def _svg_segment_projection(segments: list, rev_hist: list, width: int = 420, height: int = 220) -> str:
+    """Line chart: 历史总营收 + 3 情景 3 年预测（Bull/Base/Bear）."""
+    if not segments or not rev_hist:
+        return f'<svg width="{width}" height="{height}"></svg>'
+
+    # 计算 3 年 projection
+    latest_rev = rev_hist[-1]
+    bull_sum_3y, base_sum_3y, bear_sum_3y = 0, 0, 0
+    for s in segments:
+        share = (s.get("latest_share_pct", 0) or 0) / 100
+        bull_cagr = (s.get("bull_growth_3y_cagr") or 0) / 100
+        base_cagr = (s.get("base_growth_3y_cagr") or 0) / 100
+        bear_cagr = (s.get("bear_growth_3y_cagr") or 0) / 100
+        # 按份额加权
+        bull_sum_3y += share * ((1 + bull_cagr) ** 3)
+        base_sum_3y += share * ((1 + base_cagr) ** 3)
+        bear_sum_3y += share * ((1 + bear_cagr) ** 3)
+
+    bull_3y_rev = latest_rev * bull_sum_3y
+    base_3y_rev = latest_rev * base_sum_3y
+    bear_3y_rev = latest_rev * bear_sum_3y
+
+    # Build full timeline: 历史 N 年 + 未来 3 年
+    n_hist = len(rev_hist)
+    all_x = list(range(n_hist + 3))
+    hist_y = list(rev_hist)
+
+    # 3 条预测线从 latest 点分叉
+    # 线性插值 Year+1 / +2 / +3（简化：假设年均复合）
+    def project(cagr_3y_total: float) -> list[float]:
+        # cagr_3y_total 是 3 年总倍数（e.g. 1.33 = +33%）
+        yr_growth = cagr_3y_total ** (1/3)
+        return [latest_rev * (yr_growth ** i) for i in range(1, 4)]
+    bull_y = project(bull_sum_3y)
+    base_y = project(base_sum_3y)
+    bear_y = project(bear_sum_3y)
+
+    all_y = hist_y + [max(bull_y[-1], base_y[-1], bear_y[-1])]
+    ymin = min(all_y + hist_y + bear_y) * 0.9
+    ymax = max(all_y + hist_y + bull_y) * 1.05
+    span = max(ymax - ymin, 1e-6)
+
+    pad = 40
+    chart_w = width - pad - 20
+    chart_h = height - pad - 20
+
+    def sx(i): return pad + i / (len(all_x) - 1) * chart_w
+    def sy(v): return pad + (1 - (v - ymin) / span) * chart_h
+
+    # 历史线（灰）
+    hist_pts = [f"{sx(i):.1f},{sy(y):.1f}" for i, y in enumerate(hist_y)]
+    hist_path = "M " + " L ".join(hist_pts)
+
+    # 三条未来线各自从 (n_hist-1, latest) 延伸
+    def future_path(y_list: list[float]) -> str:
+        start_idx = n_hist - 1
+        pts = [f"{sx(start_idx):.1f},{sy(latest_rev):.1f}"]
+        for j, y in enumerate(y_list, 1):
+            pts.append(f"{sx(start_idx + j):.1f},{sy(y):.1f}")
+        return "M " + " L ".join(pts)
+
+    bull_path = future_path(bull_y)
+    base_path = future_path(base_y)
+    bear_path = future_path(bear_y)
+
+    # Y 轴 gridlines
+    grid = ""
+    for frac in (0.25, 0.5, 0.75, 1.0):
+        y = pad + frac * chart_h
+        v = ymax - frac * span
+        grid += (
+            f'<line x1="{pad}" y1="{y:.1f}" x2="{width-20}" y2="{y:.1f}" stroke="#e2e8f0" stroke-width="1" stroke-dasharray="2,2"/>'
+            f'<text x="{pad-6}" y="{y:.1f}" text-anchor="end" font-size="9" fill="#94a3b8" dy="3">{v:.0f}</text>'
+        )
+
+    # X 轴 labels (历史年份 + 未来 Y+1/+2/+3)
+    x_labels = ""
+    for i in range(len(all_x)):
+        if i < n_hist:
+            lbl = f"T-{n_hist - 1 - i}" if i < n_hist - 1 else "T"
+        else:
+            lbl = f"T+{i - n_hist + 1}"
+        x_labels += (
+            f'<text x="{sx(i):.1f}" y="{height - 10}" text-anchor="middle" font-size="9" fill="#64748b">{lbl}</text>'
+        )
+
+    # Legend
+    legend = (
+        f'<g transform="translate({width - 120}, {pad - 22})">'
+        f'<rect x="-4" y="-12" width="120" height="16" fill="#fff" opacity="0.8" rx="3"/>'
+        f'<line x1="0" y1="0" x2="12" y2="0" stroke="#059669" stroke-width="2"/>'
+        f'<text x="16" y="3" font-size="10" fill="#059669">Bull</text>'
+        f'<line x1="40" y1="0" x2="52" y2="0" stroke="#d97706" stroke-width="2"/>'
+        f'<text x="56" y="3" font-size="10" fill="#d97706">Base</text>'
+        f'<line x1="80" y1="0" x2="92" y2="0" stroke="#dc2626" stroke-width="2"/>'
+        f'<text x="96" y="3" font-size="10" fill="#dc2626">Bear</text>'
+        f'</g>'
+    )
+
+    # End-point labels
+    end_labels = (
+        f'<text x="{sx(n_hist + 2) + 4:.1f}" y="{sy(bull_y[-1]):.1f}" font-size="10" fill="#059669" font-weight="700" dy="3">{bull_y[-1]:.0f}</text>'
+        f'<text x="{sx(n_hist + 2) + 4:.1f}" y="{sy(base_y[-1]):.1f}" font-size="10" fill="#d97706" font-weight="700" dy="3">{base_y[-1]:.0f}</text>'
+        f'<text x="{sx(n_hist + 2) + 4:.1f}" y="{sy(bear_y[-1]):.1f}" font-size="10" fill="#dc2626" font-weight="700" dy="3">{bear_y[-1]:.0f}</text>'
+    )
+
+    return f'''<svg width="{width}" height="{height}" viewBox="0 0 {width} {height}">
+  {grid}
+  <path d="{hist_path}" stroke="#64748b" stroke-width="2" fill="none"/>
+  <path d="{bull_path}" stroke="#059669" stroke-width="2.5" fill="none" stroke-dasharray="5,3"/>
+  <path d="{base_path}" stroke="#d97706" stroke-width="2.5" fill="none" stroke-dasharray="5,3"/>
+  <path d="{bear_path}" stroke="#dc2626" stroke-width="2.5" fill="none" stroke-dasharray="5,3"/>
+  {"".join(f'<circle cx="{sx(i):.1f}" cy="{sy(y):.1f}" r="3" fill="#64748b"/>' for i, y in enumerate(hist_y))}
+  {x_labels}
+  {legend}
+  {end_labels}
+</svg>'''
+
+
 def _render_dcf_block(dim20: dict) -> str:
     """DCF methodology + WACC breakdown + sensitivity heatmap."""
     dcf = (dim20 or {}).get("dcf") or {}
@@ -2537,10 +2873,12 @@ def _render_institutional_section(raw: dict) -> str:
     if not (d20 or d21 or d22):
         return '<div class="muted" style="padding:20px;text-align:center;color:#9ca3af">Task 1.5 机构建模数据缺失 · 请运行 compute_deep_methods</div>'
 
+    ticker = raw.get("ticker", "")
     return (
         _render_dcf_block(d20) +
         _render_comps_block(d20) +
         _render_lbo_block(d20) +
+        _render_segmental_block(ticker) +  # v2.10 · 分业务 bottom-up，DCF 交叉校验
         _render_initiating_coverage(d21) +
         _render_ic_memo(d22) +
         _render_catalyst_calendar(d21) +

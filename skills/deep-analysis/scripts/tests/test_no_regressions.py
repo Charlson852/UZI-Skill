@@ -731,6 +731,24 @@ def test_segmental_command_md_exists():
     assert cmd.exists(), "v2.10 regression: /segmental-model 命令定义缺失"
 
 
+def test_segmental_renderer_produces_html():
+    """v2.10 · assemble_report 必须有 _render_segmental_block + svg helpers"""
+    src = (SCRIPTS_DIR / "assemble_report.py").read_text(encoding="utf-8")
+    assert "_render_segmental_block" in src, "v2.10 regression: 缺 _render_segmental_block"
+    assert "_svg_segment_donut" in src, "v2.10 regression: 缺 donut 渲染"
+    assert "_svg_segment_projection" in src, "v2.10 regression: 缺 3 情景折线"
+    # 必须接到 institutional_section
+    assert "_render_segmental_block(ticker)" in src, \
+        "v2.10 regression: segmental block 未接入 _render_institutional_section"
+
+
+def test_segmental_template_css_exists():
+    """template 必须有 segmental CSS（否则渲染出来 layout 全乱）"""
+    tpl = (SCRIPTS_DIR.parent / "assets" / "report-template.html").read_text(encoding="utf-8")
+    assert ".segmental-section" in tpl, "v2.10 regression: template 缺 segmental CSS"
+    assert ".seg-card" in tpl and ".cagr-cell" in tpl
+
+
 if __name__ == "__main__":
     # Manual runner — no pytest required
     import inspect

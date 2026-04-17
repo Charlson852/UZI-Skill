@@ -426,6 +426,41 @@ def check_panel_insights_rendered(ctx: dict) -> list[Issue]:
     return issues
 
 
+def check_segmental_model_consistency(ctx: dict) -> list[Issue]:
+    """v2.10 · 若 agent 写了 segmental_model.json，必须通过 validate + 总和对账.
+
+    这个 check 是 **软的**（segmental 是可选功能）：文件不存在 → 跳过；
+    存在但 validate 失败 → 报 critical（不能让坏模型进报告）。
+    """
+    issues = []
+    from pathlib import Path
+    from lib.cache import read_task_output
+    ticker = ctx.get("ticker", "")
+    if not ticker: return issues
+    filled = read_task_output(ticker, "segmental_model")
+    if not filled: return issues  # 没跑过 /segmental-model，跳过
+
+    validation = read_task_output(ticker, "segmental_validation")
+    if validation is None:
+        issues.append(Issue(
+            severity="warning", category="self-check", dim="segmental",
+            issue="segmental_model.json 存在但没跑 validate",
+            evidence="missing segmental_validation.json",
+            suggested_fix=f"python compute_segmental.py validate {ticker}",
+        ))
+        return issues
+
+    if not validation.get("passed"):
+        errs = validation.get("errors", [])
+        issues.append(Issue(
+            severity="critical", category="self-check", dim="segmental",
+            issue=f"segmental model 校验未通过 ({len(errs)} errors)",
+            evidence="; ".join(errs[:2]),
+            suggested_fix="修 segmental_model.json 后重跑 validate",
+        ))
+    return issues
+
+
 def check_debate_bull_bear_populated(ctx: dict) -> list[Issue]:
     """v2.9.1 · debate.bull / bear 不能是空对象（否则模板会显示默认 buffett 假头像）"""
     issues = []
@@ -475,6 +510,8 @@ CHECKS = [
     check_consensus_formula_sanity,
     check_panel_insights_rendered,
     check_debate_bull_bear_populated,
+    # v2.10 · Segmental build-up model（软 check：没跑过就跳过）
+    check_segmental_model_consistency,
 ]
 
 
