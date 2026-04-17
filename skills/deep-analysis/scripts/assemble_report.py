@@ -2073,15 +2073,15 @@ def trap_color_emoji(level: str) -> tuple[str, str]:
 # ═══════════════════════════════════════════════════════════════
 
 def _render_segmental_block(ticker: str) -> str:
-    """v2.10 · 分业务收入模型块 (如果 agent 跑过 /segmental-model 则展示).
+    """v2.10 · 分业务收入模型块.
 
-    数据源: .cache/<ticker>/segmental_model.json (agent 填) +
-            .cache/<ticker>/segmental_validation.json (脚本校验)
+    数据源: segmental_model.json + segmental_validation.json + synthesis.json
 
-    视觉:
-      ┌─ 核心叙事 + 对账徽章 + Base 3Y 总增速 ─────────────┐
-      ├─ [Donut: 当前营收构成] · [Line: 历史+3情景预测]  ─┤
-      └─ [卡片列表: 每 segment driver + thesis + 3 CAGR] ─┘
+    视觉（v2.10+ 扩充版）:
+      ┌─ 核心叙事 + 对账徽章 + Base 3Y + DCF cross-check ────────┐
+      ├─ [Donut: 当前营收构成] · [Line: 历史+3情景预测]         ─┤
+      ├─ [3 年数字预测表] 每 segment × 3 情景 × Y+1/Y+2/Y+3    ─┤
+      └─ [卡片: driver + 毛利率 + 利润贡献 + sparkline 历史]   ─┘
     """
     from lib.cache import read_task_output
     model = read_task_output(ticker, "segmental_model")
@@ -2090,6 +2090,7 @@ def _render_segmental_block(ticker: str) -> str:
 
     validation = read_task_output(ticker, "segmental_validation") or {}
     summary = validation.get("summary") or {}
+    synthesis = read_task_output(ticker, "synthesis") or {}
 
     segments = model.get("segments") or []
     thesis = model.get("core_thesis") or model.get("thesis") or "—"
@@ -2097,7 +2098,7 @@ def _render_segmental_block(ticker: str) -> str:
     rev_hist = model.get("total_revenue_history_yi") or []
     currency = model.get("currency", "CNY")
 
-    # ═══ 对账徽章 ═══
+    # ═══ 对账徽章 + DCF cross-check ═══
     gap = summary.get("reconciliation_gap_pct", 0)
     base_3y = summary.get("base_3y_total_growth_pct", 0)
     passed = validation.get("passed", True)
@@ -2108,11 +2109,46 @@ def _render_segmental_block(ticker: str) -> str:
         f'border-radius:999px;font-size:11px;font-weight:700;letter-spacing:1px">'
         f'{badge_icon} 对账 gap {gap:.1f}%</span>'
     )
+    # 换算 3Y CAGR (annualized)
+    try:
+        base_3y_cagr = ((1 + base_3y / 100) ** (1/3) - 1) * 100
+    except Exception:
+        base_3y_cagr = 0
     growth_badge = (
         f'<span style="background:#0891b2;color:#fff;padding:4px 10px;'
         f'border-radius:999px;font-size:11px;font-weight:700">'
-        f'📈 Base 3Y 总增速 {base_3y:+.1f}%</span>'
+        f'📈 Bottom-Up Base 3Y 总增速 {base_3y:+.1f}% (CAGR {base_3y_cagr:+.1f}%)</span>'
     )
+
+    # DCF cross-check：自下而上 base vs 自上而下 DCF 隐含 CAGR
+    dcf_cagr = None
+    inst = synthesis.get("institutional_modeling") or {}
+    # DCF 模型里 stage1_growth 如果有就用；否则估算
+    dcf_d = ((synthesis.get("raw_data") or {}).get("dimensions") or {}).get("20_valuation_models") or {}
+    d20 = dcf_d.get("data") or {}
+    dcf_obj = d20.get("dcf") or {}
+    assumptions = (dcf_obj.get("wacc_breakdown") or {}).get("assumptions") or dcf_obj.get("assumptions") or {}
+    dcf_g1 = assumptions.get("stage1_growth") or assumptions.get("growth_5y")
+    if dcf_g1 is not None:
+        try:
+            dcf_cagr = float(dcf_g1) * 100
+        except (ValueError, TypeError):
+            pass
+
+    cross_check_badge = ""
+    if dcf_cagr is not None:
+        diff = abs(base_3y_cagr - dcf_cagr)
+        if diff < 3:
+            ic_color = "#059669"; ic_icon = "✓"; ic_verdict = "一致"
+        elif diff < 6:
+            ic_color = "#d97706"; ic_icon = "⚠"; ic_verdict = "小分歧"
+        else:
+            ic_color = "#dc2626"; ic_icon = "✗"; ic_verdict = "严重打架"
+        cross_check_badge = (
+            f'<span style="background:{ic_color};color:#fff;padding:4px 10px;'
+            f'border-radius:999px;font-size:11px;font-weight:700">'
+            f'🔀 {ic_icon} vs DCF 自上而下 {dcf_cagr:.1f}% · {ic_verdict}</span>'
+        )
 
     # ═══ Donut: 当前营收构成 ═══
     donut_svg = _svg_segment_donut(segments, total_rev, currency, size=220)
@@ -2120,7 +2156,10 @@ def _render_segmental_block(ticker: str) -> str:
     # ═══ Line chart: 历史 + 3 情景预测 ═══
     line_svg = _svg_segment_projection(segments, rev_hist, width=420, height=220)
 
-    # ═══ 各 segment driver 卡片 ═══
+    # ═══ 3 年 × 3 情景具体数字表 ═══
+    projection_table = _render_segmental_projection_table(segments, currency)
+
+    # ═══ 各 segment driver 卡片 (v2.10+ 含毛利/利润贡献/sparkline) ═══
     segment_cards = ""
     THESIS_ICONS = {
         "cash_cow": ("💰", "#059669", "稳定现金牛"),
@@ -2141,19 +2180,71 @@ def _render_segmental_block(ticker: str) -> str:
         base = s.get("base_growth_3y_cagr")
         bear = s.get("bear_growth_3y_cagr")
         note = s.get("agent_note") or ""
+        # v2.10 富字段
+        gm = s.get("gross_margin_pct")
+        profit_share = s.get("profit_share_pct")
+        hist_rev = s.get("revenue_history_yi") or []
+        hist_periods = s.get("history_periods") or []
 
         icon, color, tag_cn = THESIS_ICONS.get(tag, THESIS_ICONS[""])
         drivers_html = "".join(
             f'<span class="seg-driver">{d}</span>' for d in drivers[:5]
         ) or '<span class="seg-driver muted">（agent 未填 drivers）</span>'
 
+        # 毛利率 + 利润贡献徽章
+        margin_badges = ""
+        if gm is not None:
+            margin_color = "#059669" if gm >= 40 else ("#d97706" if gm >= 20 else "#dc2626")
+            margin_badges += (
+                f'<span class="seg-metric" style="color:{margin_color}">'
+                f'毛利率 <strong>{gm:.1f}%</strong></span>'
+            )
+        if profit_share is not None and share:
+            # 利润占比 vs 营收占比 对比：高于营收占比 = 高毛利段
+            delta = profit_share - share
+            if abs(delta) >= 2:
+                sign = "+" if delta > 0 else ""
+                delta_color = "#059669" if delta > 0 else "#dc2626"
+                margin_badges += (
+                    f'<span class="seg-metric" style="color:{delta_color}">'
+                    f'利润贡献 {profit_share:.1f}% <small>({sign}{delta:.1f}pp vs 营收)</small></span>'
+                )
+
+        # 历史 sparkline (>= 3 点才画)
+        sparkline_html = ""
+        if len(hist_rev) >= 3:
+            sparkline_html = (
+                f'<div class="seg-spark">'
+                f'<span class="spark-lbl">{hist_periods[0][:7]} → {hist_periods[-1][:7]}</span>'
+                f'{svg_sparkline(hist_rev, width=160, height=32, color=color, fill=True)}'
+                f'<span class="spark-val">{hist_rev[-1]:.0f}亿</span>'
+                f'</div>'
+            )
+
         cagr_row = ""
         if bull is not None and base is not None and bear is not None:
+            # 3 年后的每一情景终点营收
+            latest = rev
+            bull_end = latest * ((1 + bull / 100) ** 3)
+            base_end = latest * ((1 + base / 100) ** 3)
+            bear_end = latest * ((1 + bear / 100) ** 3)
             cagr_row = (
                 f'<div class="seg-cagr">'
-                f'<div class="cagr-cell bull"><span class="lbl">Bull</span><span class="val">{bull:+.1f}%</span></div>'
-                f'<div class="cagr-cell base"><span class="lbl">Base</span><span class="val">{base:+.1f}%</span></div>'
-                f'<div class="cagr-cell bear"><span class="lbl">Bear</span><span class="val">{bear:+.1f}%</span></div>'
+                f'<div class="cagr-cell bull">'
+                f'  <span class="lbl">Bull CAGR</span>'
+                f'  <span class="val">{bull:+.1f}%</span>'
+                f'  <span class="end">→ {bull_end:,.0f}</span>'
+                f'</div>'
+                f'<div class="cagr-cell base">'
+                f'  <span class="lbl">Base CAGR</span>'
+                f'  <span class="val">{base:+.1f}%</span>'
+                f'  <span class="end">→ {base_end:,.0f}</span>'
+                f'</div>'
+                f'<div class="cagr-cell bear">'
+                f'  <span class="lbl">Bear CAGR</span>'
+                f'  <span class="val">{bear:+.1f}%</span>'
+                f'  <span class="end">→ {bear_end:,.0f}</span>'
+                f'</div>'
                 f'</div>'
             )
         else:
@@ -2170,6 +2261,8 @@ def _render_segmental_block(ticker: str) -> str:
             f'    <span class="seg-share">{share:.1f}%</span>'
             f'  </div>'
             f'  <div class="seg-rev">{currency} <strong>{rev:,.1f}</strong> 亿</div>'
+            f'  {f"<div class=\"seg-metrics-row\">{margin_badges}</div>" if margin_badges else ""}'
+            f'  {sparkline_html}'
             f'  <div class="seg-drivers">{drivers_html}</div>'
             f'  {cagr_row}'
             f'  {note_html}'
@@ -2195,7 +2288,7 @@ def _render_segmental_block(ticker: str) -> str:
       <div class="section-tag">SEGMENTAL · 分业务建模</div>
       <h3>{_safe(model.get("name"))} · 分业务收入 Build-Up</h3>
     </div>
-    <div class="seg-badges">{badge_html} {growth_badge}</div>
+    <div class="seg-badges">{badge_html} {growth_badge} {cross_check_badge}</div>
   </div>
 
   <div class="seg-thesis">
@@ -2214,12 +2307,92 @@ def _render_segmental_block(ticker: str) -> str:
     </div>
   </div>
 
+  {projection_table}
+
   <div class="seg-cards-grid">{segment_cards}</div>
 
   {warn_line}
   <div class="seg-source">数据来源 · {src_line}</div>
 </div>
 '''
+
+
+def _render_segmental_projection_table(segments: list, currency: str) -> str:
+    """v2.10 · 3 情景 × 3 年具体数字预测表 (不只 CAGR)."""
+    if not segments:
+        return ""
+
+    # 对每个 segment 计算 Y+1/Y+2/Y+3 的具体营收（3 情景）
+    rows_html = ""
+    totals = {"bull": [0, 0, 0], "base": [0, 0, 0], "bear": [0, 0, 0]}
+    for s in segments:
+        name = s.get("name", "")
+        rev = s.get("latest_revenue_yi", 0)
+        bull = s.get("bull_growth_3y_cagr")
+        base = s.get("base_growth_3y_cagr")
+        bear = s.get("bear_growth_3y_cagr")
+        if bull is None or base is None or bear is None:
+            continue
+
+        projections = {"bull": [], "base": [], "bear": []}
+        for sc, cagr in [("bull", bull), ("base", base), ("bear", bear)]:
+            for yr in (1, 2, 3):
+                val = rev * ((1 + cagr / 100) ** yr)
+                projections[sc].append(val)
+                totals[sc][yr-1] += val
+
+        rows_html += (
+            f'<tr>'
+            f'<td class="seg-tbl-name">{name}</td>'
+            f'<td class="seg-tbl-cur">{rev:,.0f}</td>'
+            + "".join(
+                f'<td class="seg-tbl-val {sc}">{v:,.0f}</td>'
+                for sc in ("bull", "base", "bear")
+                for v in projections[sc]
+            ) +
+            '</tr>'
+        )
+
+    # Total 行
+    if any(totals["base"]):
+        total_row = (
+            f'<tr class="seg-tbl-total">'
+            f'<td class="seg-tbl-name"><strong>合计</strong></td>'
+            f'<td class="seg-tbl-cur"><strong>{sum(s.get("latest_revenue_yi", 0) for s in segments):,.0f}</strong></td>'
+            + "".join(
+                f'<td class="seg-tbl-val {sc}"><strong>{v:,.0f}</strong></td>'
+                for sc in ("bull", "base", "bear")
+                for v in totals[sc]
+            ) +
+            '</tr>'
+        )
+    else:
+        total_row = ""
+        return ""  # 没有 CAGR 就不显示表
+
+    if not rows_html:
+        return ""
+
+    return (
+        '<div class="seg-projection-table-wrap">'
+        '<div class="seg-chart-title">3 情景 × 3 年营收预测 · 单位 ' + currency + ' 亿</div>'
+        '<table class="seg-projection-table">'
+        '<thead>'
+        '<tr>'
+        '<th rowspan="2" class="seg-tbl-name">业务线</th>'
+        '<th rowspan="2" class="seg-tbl-cur">当前</th>'
+        '<th colspan="3" class="bull">Bull 🚀</th>'
+        '<th colspan="3" class="base">Base 📊</th>'
+        '<th colspan="3" class="bear">Bear 📉</th>'
+        '</tr>'
+        '<tr>'
+        + "".join(f'<th class="{sc}">Y+{y}</th>' for sc in ("bull", "base", "bear") for y in (1, 2, 3))
+        + '</tr>'
+        '</thead>'
+        '<tbody>' + rows_html + total_row + '</tbody>'
+        '</table>'
+        '</div>'
+    )
 
 
 def _svg_segment_donut(segments: list, total_rev: float, currency: str, size: int = 220) -> str:

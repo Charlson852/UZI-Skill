@@ -55,6 +55,11 @@ class Segment:
     latest_revenue_yi: float            # 最新一期营收（亿元）
     latest_share_pct: float             # 占比 %
     yoy_growth_pct: float | None = None  # 最近同比（若有）
+    # v2.10 · 富字段（脚本自动填，来自 main_business_raw）
+    gross_margin_pct: float | None = None     # 毛利率 %
+    profit_share_pct: float | None = None     # 利润占比 %（vs 营收占比对比揭示高/低毛利段）
+    revenue_history_yi: list[float] = field(default_factory=list)  # 该 segment 历史营收（季度或年）
+    history_periods: list[str] = field(default_factory=list)        # 对应报告期
     # 以下字段由 agent 填
     drivers: list[str] = field(default_factory=list)           # e.g. ["ASP +5%", "shipment +20%"]
     thesis_tag: str = ""                # e.g. "growth_engine" / "declining" / "stable_cash_cow"
@@ -140,12 +145,16 @@ def discover_segments(raw: dict, min_share_pct: float = 3.0, max_segments: int =
             classification = "按产品分类" if by_product else ("按行业分类" if by_industry else "mixed")
 
             other_share = 0.0
+            # v2.10 · 拉历史数据供 sparkline 用（同 segment 多报告期）
+            # 按报告期排序（旧→新），供每个 segment 画趋势
+            all_periods_sorted = sorted({str(r.get("报告日期", "")) for r in mb_raw if r.get("报告日期")})
+
             for r in chosen:
                 nm = str(r.get("主营构成", "")).strip()
                 if not nm or nm in ("合计", "总计", "其他(补充)"):
                     continue
                 rev_yuan = r.get("主营收入") or 0
-                share_dec = r.get("收入比例") or 0  # 0-1 decimal
+                share_dec = r.get("收入比例") or 0
                 try:
                     rev_yuan = float(rev_yuan)
                     share_dec = float(share_dec)
@@ -157,18 +166,50 @@ def discover_segments(raw: dict, min_share_pct: float = 3.0, max_segments: int =
                 if share_pct < min_share_pct:
                     other_share += share_pct
                     continue
+
+                # 富字段：毛利率 + 利润占比
+                gross_margin_pct = None
+                profit_share_pct = None
+                try:
+                    gm = r.get("毛利率")
+                    if gm is not None and not (isinstance(gm, float) and gm != gm):  # NaN filter
+                        gross_margin_pct = round(float(gm) * 100, 1)
+                except (ValueError, TypeError):
+                    pass
+                try:
+                    ps = r.get("利润比例")
+                    if ps is not None:
+                        profit_share_pct = round(float(ps) * 100, 2)
+                except (ValueError, TypeError):
+                    pass
+
+                # 富字段：该 segment 的历史营收（用同分类同 segment 的多期数据）
+                hist_rev: list[float] = []
+                hist_periods: list[str] = []
+                same_seg_records = [
+                    rr for rr in mb_raw
+                    if str(rr.get("主营构成", "")).strip() == nm
+                    and str(rr.get("分类类型", "")) == classification
+                ]
+                same_seg_records.sort(key=lambda x: str(x.get("报告日期", "")))
+                for rr in same_seg_records:
+                    try:
+                        yi = float(rr.get("主营收入", 0)) / 1e8
+                        if yi > 0:
+                            hist_rev.append(round(yi, 2))
+                            hist_periods.append(str(rr.get("报告日期", ""))[:10])
+                    except (ValueError, TypeError):
+                        continue
+
                 seg = Segment(
                     name=nm[:20],
                     latest_revenue_yi=round(rev_yuan / 1e8, 2),
                     latest_share_pct=share_pct,
+                    gross_margin_pct=gross_margin_pct,
+                    profit_share_pct=profit_share_pct,
+                    revenue_history_yi=hist_rev,
+                    history_periods=hist_periods,
                 )
-                # 附加毛利率信息到 agent_note（agent 做 driver 分析的输入）
-                gross_margin = r.get("毛利率")
-                if gross_margin is not None:
-                    try:
-                        seg.agent_note = f"毛利率 {float(gross_margin)*100:.1f}%（待 agent 填 driver）"
-                    except (ValueError, TypeError):
-                        pass
                 segments.append(seg)
                 if len(segments) >= max_segments:
                     break
