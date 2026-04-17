@@ -254,6 +254,10 @@ def collect_raw_data(ticker: str, max_workers: int = 6, resume: bool = True) -> 
     wave2_elapsed = time.time() - wave2_start
     print(f"  [wave 2] done in {wave2_elapsed:.1f}s")
 
+    # v2.7.2 · 强制 flush：wave2 结束后立即把 dims（含 timeout 标记）落盘一次，
+    # 防止 Ctrl+C / 后续 wave3 crash 时丢失 wave2 的完整状态（包括被标记超时的 fetcher）。
+    _persist_progress()
+
     # ── Wave 3: bonus fetchers (parallel) ──
     print("  [wave 3] bonus fetchers parallel ...")
     wave3_start = time.time()
@@ -306,6 +310,14 @@ def collect_raw_data(ticker: str, max_workers: int = 6, resume: bool = True) -> 
     raw["dimensions"] = dims
     total_elapsed = time.time() - t0
     print(f"\n  Task 1 total: {total_elapsed:.1f}s (wave1 {time.time() - wave1_start:.1f}s + wave2 {wave2_elapsed:.1f}s + wave3 {wave3_elapsed:.1f}s)")
+
+    # v2.7.2 · stage1 收尾再 flush 一次，确保 wave3 的 fund_managers / similar_stocks 也已落盘
+    try:
+        from lib.cache import write_task_output as _write_cache_final
+        _write_cache_final(ticker, "raw_data", raw)
+    except Exception:
+        pass
+
     return raw
 
 

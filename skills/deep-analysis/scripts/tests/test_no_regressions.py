@@ -212,6 +212,46 @@ def test_all_lib_imports_ok():
     assert not failures, "import failures:\n  " + "\n  ".join(failures)
 
 
+# ─── BUG#R7 (v2.7.2) · HK fetch_financials 必须有真实实现 ──
+def test_fetch_financials_hk_branch_implemented():
+    """HK 分支不能再是 `data = {}` stub；必须调用真实 akshare HK 接口"""
+    src = (SCRIPTS_DIR / "fetch_financials.py").read_text(encoding="utf-8")
+    # 必须有 _fetch_hk 函数
+    assert "def _fetch_hk(" in src, "BUG#R7 regression: 缺少 _fetch_hk(ti)"
+    # main 分支必须走 _fetch_hk 而不是 else stub
+    assert 'elif ti.market == "H":' in src, "BUG#R7 regression: main 未分发 HK 到 _fetch_hk"
+    assert "_fetch_hk(ti)" in src, "BUG#R7 regression: main 没调 _fetch_hk"
+    # 必须调用 stock_financial_hk_analysis_indicator_em
+    assert "stock_financial_hk_analysis_indicator_em" in src, \
+        "BUG#R7 regression: HK 实现必须调 stock_financial_hk_analysis_indicator_em"
+
+
+# ─── BUG#R8 (v2.7.2) · HK kline 必须有 fallback chain ──
+def test_kline_hk_has_fallback_chain():
+    """HK kline 不能只有 ak.stock_hk_hist 一路；必须有 Sina / yfinance 兜底"""
+    src = (SCRIPTS_DIR / "lib" / "data_sources.py").read_text(encoding="utf-8")
+    assert "_kline_hk_chain" in src, "BUG#R8 regression: 缺 _kline_hk_chain 函数"
+    # 函数体内必须同时引用 stock_hk_hist + stock_hk_daily + yfinance 3 条路径
+    chain_idx = src.find("def _kline_hk_chain")
+    assert chain_idx > 0
+    body = src[chain_idx:chain_idx + 3000]
+    assert "stock_hk_hist" in body, "BUG#R8 regression: chain 缺东财路径"
+    assert "stock_hk_daily" in body, "BUG#R8 regression: chain 缺 Sina 路径"
+    assert ".HK" in body or "yf.Ticker" in body, "BUG#R8 regression: chain 缺 yfinance 路径"
+
+
+# ─── BUG#R9 (v2.7.2) · wave2 结束必须 flush ──
+def test_wave2_persists_before_wave3():
+    """wave2 整体超时 / 正常结束 后必须强制 flush raw_data；否则 timeout 标记会丢"""
+    src = (SCRIPTS_DIR / "run_real_test.py").read_text(encoding="utf-8")
+    w2_done = src.find('[wave 2] done in')
+    w3_start = src.find('[wave 3] bonus fetchers')
+    assert w2_done > 0 and w3_start > w2_done, "wave2/wave3 log markers not found"
+    between = src[w2_done:w3_start]
+    assert "_persist_progress()" in between, \
+        "BUG#R9 regression: wave2 结束到 wave3 开始之间必须有 _persist_progress()"
+
+
 if __name__ == "__main__":
     # Manual runner — no pytest required
     import inspect

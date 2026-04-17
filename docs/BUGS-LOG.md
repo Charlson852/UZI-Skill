@@ -5,6 +5,51 @@
 
 ---
 
+## v2.7.2 (2026-04-17 hotfix)
+
+### BUG#R7 · HK `1_financials` 永远空（stub 从未实现）
+- **症状**：所有港股 `1_financials` 返回 `data={}`；ROE / 营收 / 净利 /
+  毛利率 / 负债率 / ROIC 全缺；agent 盲评 → 报告完整性掉到 56%
+- **位置**：`scripts/fetch_financials.py::main` HK 分支
+- **根因**：旧代码 `else: data = {}`（HK 走这里），注释承认 "akshare has
+  stock_financial_hk_abstract but field names differ" 但 stub 从未补上
+- **修法**：新 `_fetch_hk(ti)` 调用 `ak.stock_financial_hk_analysis_indicator_em`，
+  把 ROE_AVG / ROE_YEARLY / ROIC_YEARLY / OPERATE_INCOME / HOLDER_PROFIT /
+  DEBT_ASSET_RATIO / CURRENT_RATIO / GROSS_PROFIT_RATIO + YoY 映射到 A 股
+  一致的字段；额外保留 HK 特有 `eps` / `bps` / `currency`
+- **验证**：`00700.HK` → `roe=21.1%` · `roe_history=[28.1, 29.8, 24.6, 15.1, 21.8, 21.1]` ·
+  `revenue_history` 6 年亿元 · `financial_health` 完整
+- **若未来改 fetch_financials**：HK 分支必须返回 ROE + 6 年历史，否则
+  港股技术面/基本面评委全部盲评
+
+### BUG#R8 · HK 2_kline 只有 1 条路径，GFW 一丢包就 0 根
+- **症状**：港股 `kline_count=0`、`stage='—'`、所有技术指标 None；
+  `ds.fetch_kline` 在东财 push2his 被代理丢包时直接失败无兜底
+- **位置**：`scripts/lib/data_sources.py::_fetch_kline_impl` HK 分支
+- **根因**：HK 只有 `ak.stock_hk_hist` 一条路径；A 股已有 6 路 fallback 链，
+  但 HK 从未对齐
+- **修法**：新 `_kline_hk_chain()` 三层 fallback：
+  1. `ak.stock_hk_hist`（东财 push2）
+  2. `ak.stock_hk_daily`（新浪, 返 5366 rows IPO-至今）
+  3. `yfinance 0700.HK`（海外兜底；自动 `00700` → `700.HK`）
+  所有路径返回结果归一到东财中文列（日期/开盘/收盘/最高/最低/成交量）
+- **验证**：mock 东财失败后 Sina fallback 正常返 561 rows, stage='Stage 1 底部'
+- **若未来改 HK kline**：必须保留至少 2 路以上 fallback；返回前归一到中文列
+
+### BUG#R9 · Wave2 结束未 flush，timeout 标记会丢
+- **症状**：跑完 465s 后 `raw_data.json` 里某维度**完全消失**（不是 OK 也不是
+  timeout），agent 无法辨别"没跑过"还是"跑挂了"
+- **位置**：`scripts/run_real_test.py::collect_raw_data` wave2 末尾
+- **根因**：`_persist_progress()` 每 3 个 fetcher 落盘一次；wave2 整体 300s
+  超时后把未完成 fetcher 标记 `_timeout=True` 写入 `dims` **仅在内存**；
+  wave3 再跑 160s 期间若 Ctrl+C / crash，wave2 的 timeout 标记全丢
+- **修法**：wave2 结束立即 `_persist_progress()` + stage1 收尾再 flush 一次。
+  raw_data 始终反映最新完整状态。
+- **若未来改 wave2/wave3**：任何新 wave 结束必须强制 flush，不要指望增量
+  持久化覆盖 wave 结束的关键状态
+
+---
+
 ## v2.7.1 (2026-04-17 hotfix)
 
 ### BUG#R5 · 19_contests xueqiu_cubes 全空（XueQiu 登录政策变化）

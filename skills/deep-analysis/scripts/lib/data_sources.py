@@ -652,12 +652,8 @@ def _fetch_kline_impl(ti: TickerInfo, period: str, start: str, adjust: str) -> l
     """
     if ti.market == "A":
         return _kline_a_share_chain(ti, period, start, adjust)
-    if ti.market == "H" and ak:
-        try:
-            df = _retry(lambda: ak.stock_hk_hist(symbol=ti.code.zfill(5), period=period, start_date=start, adjust=adjust))
-            return df.to_dict("records") if df is not None else []
-        except Exception:
-            pass
+    if ti.market == "H":
+        return _kline_hk_chain(ti, period, start, adjust)
     if ti.market == "U":
         return _kline_us_chain(ti)
     return []
@@ -788,6 +784,65 @@ def _kline_a_share_chain(ti: TickerInfo, period: str, start: str, adjust: str) -
 
     # ── All failed
     return [{"_kline_fetch_error": "; ".join(errors) or "no source available"}]
+
+
+def _kline_hk_chain(ti: TickerInfo, period: str, start: str, adjust: str) -> list[dict]:
+    """v2.7.2 · HK K-line multi-source fallback chain.
+
+    之前只有 ak.stock_hk_hist 一条路径（东财 push2his），GFW/代理丢包时直接 0 根。
+    补齐 3 条后备：
+      1. ak.stock_hk_hist       (东财 push2, 原主路径)
+      2. ak.stock_hk_daily      (新浪, 覆盖全部港股, IPO 至今)
+      3. yfinance 0700.HK       (海外镜像, 补最后兜底)
+    """
+    code5 = ti.code.zfill(5)
+    errors: list[str] = []
+
+    # ── 1. akshare 东财
+    if ak:
+        try:
+            df = _retry(lambda: ak.stock_hk_hist(symbol=code5, period=period, start_date=start, adjust=adjust), attempts=2)
+            if df is not None and len(df) > 0:
+                return df.to_dict("records")
+        except Exception as e:
+            errors.append(f"akshare-hk-em: {type(e).__name__}: {str(e)[:80]}")
+
+    # ── 2. akshare 新浪
+    if ak:
+        try:
+            df = _retry(lambda: ak.stock_hk_daily(symbol=code5, adjust="qfq" if adjust == "qfq" else ""), attempts=2)
+            if df is not None and len(df) > 0:
+                # Sina 返回 date/open/high/low/close/volume/amount，归一到东财中文列
+                if start:
+                    try:
+                        import pandas as _pd
+                        df["date"] = _pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
+                        df = df[df["date"] >= f"{start[:4]}-{start[4:6]}-{start[6:8]}"]
+                    except Exception:
+                        pass
+                rename = {"date": "日期", "open": "开盘", "close": "收盘", "high": "最高", "low": "最低", "volume": "成交量", "amount": "成交额"}
+                df = df.rename(columns=rename)
+                return df.to_dict("records")
+        except Exception as e:
+            errors.append(f"akshare-hk-sina: {type(e).__name__}: {str(e)[:80]}")
+
+    # ── 3. yfinance
+    if yf:
+        try:
+            yf_code = f"{code5.lstrip('0') or '0'}.HK"  # 0700 → 700.HK, 09988 → 9988.HK
+            t = yf.Ticker(yf_code)
+            start_date = f"{start[:4]}-{start[4:6]}-{start[6:8]}" if start and len(start) == 8 else "2024-01-01"
+            df = _retry(lambda: t.history(start=start_date, interval="1d"), attempts=2)
+            if df is not None and len(df) > 0:
+                df = df.reset_index()
+                # 归一列名到中文
+                rename = {"Date": "日期", "Open": "开盘", "Close": "收盘", "High": "最高", "Low": "最低", "Volume": "成交量"}
+                df = df.rename(columns=rename)
+                return df.to_dict("records")
+        except Exception as e:
+            errors.append(f"yfinance-hk: {type(e).__name__}: {str(e)[:80]}")
+
+    return [{"_kline_fetch_error": "; ".join(errors) or "no HK source available"}]
 
 
 def _kline_us_chain(ti: TickerInfo) -> list[dict]:

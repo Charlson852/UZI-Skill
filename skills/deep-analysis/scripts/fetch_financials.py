@@ -163,6 +163,98 @@ def _fetch_a_share(ti) -> dict:
     return out
 
 
+def _fetch_hk(ti) -> dict:
+    """v2.7.2 · 港股财报 — 之前 HK 分支直接返回 {}，导致 1_financials 完全空。
+
+    数据源: akshare.stock_financial_hk_analysis_indicator_em
+      返回 9 年年度指标，含 ROE_AVG / ROE_YEARLY / ROIC_YEARLY / DEBT_ASSET_RATIO
+      / CURRENT_RATIO / GROSS_PROFIT_RATIO / OPERATE_INCOME / HOLDER_PROFIT /
+      OPERATE_INCOME_YOY / HOLDER_PROFIT_YOY / NET_PROFIT_RATIO / BASIC_EPS
+      / PER_NETCASH_OPERATE.
+    """
+    code5 = ti.code.zfill(5)
+    out: dict = {}
+    try:
+        df = ak.stock_financial_hk_analysis_indicator_em(symbol=code5, indicator="年度")
+        if df is None or df.empty:
+            return {}
+        # 按年份升序，取最近 6 年
+        df = df.sort_values("REPORT_DATE").tail(6).reset_index(drop=True)
+
+        years = [str(d)[:4] for d in df["REPORT_DATE"].tolist()]
+        out["financial_years"] = years
+
+        def _col(name, div=1.0, ndigits=2):
+            if name not in df.columns:
+                return []
+            vals = []
+            for v in df[name].tolist():
+                try:
+                    vals.append(round(float(v) / div, ndigits))
+                except (TypeError, ValueError):
+                    vals.append(None)
+            return vals
+
+        # OPERATE_INCOME 和 HOLDER_PROFIT 以 元 为单位，折算亿
+        out["revenue_history"] = _col("OPERATE_INCOME", div=1e8, ndigits=2)
+        out["net_profit_history"] = _col("HOLDER_PROFIT", div=1e8, ndigits=2)
+        out["roe_history"] = _col("ROE_AVG", ndigits=2)
+        out["gross_margin_history"] = _col("GROSS_PROFIT_RATIO", ndigits=2)
+        out["net_margin_history"] = _col("NET_PROFIT_RATIO", ndigits=2)
+
+        last = df.iloc[-1].to_dict()
+
+        def _last_pct(key, default="—"):
+            v = last.get(key)
+            try:
+                return f"{float(v):.1f}%"
+            except (TypeError, ValueError):
+                return default
+
+        out["roe"] = _last_pct("ROE_AVG")
+        out["roic"] = _last_pct("ROIC_YEARLY")
+        out["net_margin"] = _last_pct("NET_PROFIT_RATIO")
+        out["gross_margin"] = _last_pct("GROSS_PROFIT_RATIO")
+
+        # 营收增速（最后一年 YoY）
+        try:
+            out["revenue_growth"] = f"{float(last.get('OPERATE_INCOME_YOY', 0)):.1f}%"
+        except (TypeError, ValueError):
+            out["revenue_growth"] = "—"
+        try:
+            out["profit_growth"] = f"{float(last.get('HOLDER_PROFIT_YOY', 0)):.1f}%"
+        except (TypeError, ValueError):
+            out["profit_growth"] = "—"
+
+        # financial_health 子结构与 A 股保持一致
+        try:
+            out["financial_health"] = {
+                "debt_ratio": round(float(last.get("DEBT_ASSET_RATIO") or 0), 1),
+                "current_ratio": round(float(last.get("CURRENT_RATIO") or 0), 2),
+                "roic": round(float(last.get("ROIC_YEARLY") or 0), 2),
+                "fcf_margin": None,  # HK 年报未直接给 FCF margin
+            }
+        except Exception:
+            pass
+
+        # EPS / BPS
+        try:
+            out["eps"] = round(float(last.get("BASIC_EPS") or 0), 3)
+        except Exception:
+            pass
+        try:
+            out["bps"] = round(float(last.get("BPS") or 0), 2)
+        except Exception:
+            pass
+
+        out["currency"] = str(last.get("CURRENCY") or "HKD")
+    except Exception as e:
+        out["_hk_indicator_error"] = f"{type(e).__name__}: {e}"
+
+    # 港股派息（派息记录需要另一个 API；akshare 覆盖有限，暂不强制）
+    return out
+
+
 def _fetch_us(ti) -> dict:
     try:
         import yfinance as yf
@@ -197,8 +289,9 @@ def main(ticker: str) -> dict:
             data = _fetch_a_share(ti)
         elif ti.market == "U":
             data = _fetch_us(ti)
+        elif ti.market == "H":
+            data = _fetch_hk(ti)
         else:
-            # HK: akshare has stock_hk_financial_abstract but field names differ
             data = {}
         error = None
     except Exception as e:

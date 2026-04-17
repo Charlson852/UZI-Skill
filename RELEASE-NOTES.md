@@ -1,5 +1,68 @@
 # Release Notes
 
+## v2.7.2 — 2026-04-17 (hotfix)
+
+> **修复港股财报完全空 + 港股 K 线无 fallback + wave2 结束未 flush 的 3 个硬伤**
+
+### 用户报告（Codex 外部测试）
+> "港股完整性仍然只有 56%，关键缺口还在，例如 ROE 历史和 K 线阶段仍缺失；
+> A 股贵州茅台卡在 stage1，wave 2 整体超时，耗时 465.8s，没有产出最终报告。"
+
+### 根因 1（R7）· HK `1_financials` 分支从未实现
+- `fetch_financials.main()` 对 HK 直接 `data = {}`，注释写 "akshare has
+  stock_financial_hk_abstract but field names differ" 但 stub 从未补齐
+- 港股 ROE / 营收 / 净利 / 毛利率 / 负债率 / ROIC 全部缺失 → 评委团盲评 → 报告 56%
+- 修：新 `_fetch_hk(ti)` 走 `ak.stock_financial_hk_analysis_indicator_em`，
+  返回 9 年年度指标（`ROE_AVG` / `ROE_YEARLY` / `ROIC_YEARLY` /
+  `DEBT_ASSET_RATIO` / `CURRENT_RATIO` / `GROSS_PROFIT_RATIO` /
+  `OPERATE_INCOME` / `HOLDER_PROFIT` + YoY），映射到与 A 股一致的
+  `roe` / `roic` / `net_margin` / `gross_margin` / `revenue_growth` /
+  `roe_history` / `revenue_history` / `net_profit_history` / `financial_health`
+  结构，外加 HK 特有的 `eps` / `bps` / `currency` 字段。
+- 验证：`00700.HK` → `roe=21.1%` · `roic=15.2%` · `roe_history=[28.1, 29.8, 24.6, 15.1, 21.8, 21.1]`
+
+### 根因 2（R8）· HK K 线只有 1 条路径，GFW 一丢包就 0 根
+- `_fetch_kline_impl(market=H)` 只有 `ak.stock_hk_hist`（东财 push2his），
+  GFW/代理丢包 → 返回空 → `kline_count=0` → `stage='—'` → 技术面维度全废
+- 修：新 `_kline_hk_chain` 三层 fallback，与 A 股链路对称：
+  1. `ak.stock_hk_hist`（东财 push2, 原主路径）
+  2. `ak.stock_hk_daily`（新浪, 覆盖全部港股 IPO 至今；验证 5366 rows）
+  3. `yfinance 0700.HK`（海外兜底镜像；`0700` → `700.HK` 正确转换）
+  Sina / yfinance 返回列名都归一到东财中文列（日期/开盘/收盘/最高/最低/成交量）
+- 验证：东财被 mock 成 GFW 丢包 → Sina fallback 返回 561 rows →
+  `stage='Stage 1 底部'` · `ma200=582.4` · `rsi_14=51` · `ytd_return=+19.8%`
+
+### 根因 3（R9）· Wave2 结束未 flush，timeout 标记会丢
+- `_persist_progress()` 每完成 3 个 fetcher 写一次 raw_data；但 wave2 结束
+  后（含整体 300s 超时标记已写入 `dims`）没有 force flush
+- 一旦 wave3 crash / 被 Ctrl+C，wave2 的 timeout 标记在内存但从未落盘
+- 600519.SH 跑 465s 后 `12_capital_flow` 在 raw_data.json 里**完全不存在**
+  （既不是 OK 也不是 timeout）—— 这让 agent 无法辨别"没跑过"还是"跑挂了"
+- 修：wave2 结束立即 flush + stage1 收尾再 flush 一次。不管后续 wave3
+  怎样，raw_data 始终反映最新完整状态，timeout 维度保留诊断信息。
+
+### 关于 Python 版本
+- 用户反馈："如果 python3.9 版本太低很多用不了，请上高版本"
+- 验证结论：**3.9.6 实际跑得下来**。核心 deps (akshare 1.18.55 /
+  yfinance 1.2.0 / baostock 0.9.10 / playwright / ddgs) 全部支持 3.9+。
+- **不需要**抬 Python 版本下限；保持 3.9+ 兼容。报告的问题全部是数据层
+  缺 HK 分支和 fallback，跟 Python 版本无关。
+
+### 改动文件
+- `scripts/fetch_financials.py` · 新增 `_fetch_hk(ti)` (+85 行)
+- `scripts/lib/data_sources.py` · 新增 `_kline_hk_chain()` (+55 行)；
+  `_fetch_kline_impl` HK 分支委托给 chain
+- `scripts/run_real_test.py` · wave2 结束 + stage1 收尾各强制 `_persist_progress()`
+- 版本号 2.7.1 → 2.7.2（4 个 manifest）
+- BUGS-LOG · 新增 R7 / R8 / R9 记录
+
+### 回归
+- 18/18 测试全过
+- Py3.9.6 import check OK
+- HK `00700.HK` 两维真实接口调用验证 OK
+
+---
+
 ## v2.7.1 — 2026-04-17 (hotfix)
 
 > **修复 `19_contests` / `18_trap` 两维永远空的两个独立 bug**
