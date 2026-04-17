@@ -645,6 +645,92 @@ def test_stage1_early_exits_on_etf():
         "v2.9.2 regression: ETF 持仓拉取接口未使用"
 
 
+# ─── v2.10 · Segmental Revenue Build-Up 模块 ──
+def test_segmental_model_module_exists():
+    from lib import segmental_model
+    assert hasattr(segmental_model, "discover_segments")
+    assert hasattr(segmental_model, "validate_model")
+    assert hasattr(segmental_model, "SegmentalSkeleton")
+    assert hasattr(segmental_model, "Segment")
+
+
+def test_segmental_discovers_segments_from_raw_data():
+    """mock raw_data 包含 main_business_raw（最富格式），discover 必须抽出分段"""
+    from lib.segmental_model import discover_segments
+    mock_raw = {
+        "ticker": "600519.SH",
+        "market": "A",
+        "dimensions": {
+            "0_basic": {"data": {"name": "贵州茅台", "market": "A"}},
+            "1_financials": {"data": {"revenue_history": [1200, 1400, 1600, 1720], "currency": "CNY"}},
+            "5_chain": {"data": {
+                "main_business_raw": [
+                    {"分类类型": "按产品分类", "主营构成": "茅台酒", "报告日期": "2025-12-31",
+                     "主营收入": 146e9, "收入比例": 0.867, "毛利率": 0.935},
+                    {"分类类型": "按产品分类", "主营构成": "系列酒", "报告日期": "2025-12-31",
+                     "主营收入": 22e9, "收入比例": 0.132, "毛利率": 0.8},
+                ],
+            }},
+            "15_events": {"data": {"events": [{"title": "茅台推出 1935 新品上市"}]}},
+        },
+    }
+    skel = discover_segments(mock_raw)
+    assert skel.name == "贵州茅台"
+    assert len(skel.segments) == 2
+    assert skel.segments[0].name == "茅台酒"
+    assert skel.segments[0].latest_share_pct > 80
+    # 拐点关键词 "新品发布" 应该匹配到
+    assert any("1935" in c or "新品" in c for c in skel.inflection_candidates)
+
+
+def test_segmental_validate_reconciliation():
+    """sum(segment) 偏离 total_revenue >10% 必须报 error"""
+    from lib.segmental_model import validate_model
+    raw = {"dimensions": {"1_financials": {"data": {"revenue_history": [1720]}}}}
+    # 故意让总和只 1000（差 42%）
+    bad_model = {
+        "segments": [
+            {"name": "A", "latest_revenue_yi": 500, "latest_share_pct": 50,
+             "bull_growth_3y_cagr": 10, "base_growth_3y_cagr": 5, "bear_growth_3y_cagr": 0,
+             "drivers": ["x"], "thesis_tag": "cash_cow"},
+            {"name": "B", "latest_revenue_yi": 500, "latest_share_pct": 50,
+             "bull_growth_3y_cagr": 10, "base_growth_3y_cagr": 5, "bear_growth_3y_cagr": 0,
+             "drivers": ["y"], "thesis_tag": "growth_engine"},
+        ],
+    }
+    r = validate_model(bad_model, raw)
+    assert not r["passed"], "对账差 42% 必须 fail"
+    assert any("差" in e for e in r["errors"])
+
+
+def test_segmental_validate_cagr_monotonicity():
+    """bull < base < bear 不单调必须报 error"""
+    from lib.segmental_model import validate_model
+    raw = {"dimensions": {"1_financials": {"data": {"revenue_history": [1000]}}}}
+    bad_model = {
+        "segments": [
+            {"name": "X", "latest_revenue_yi": 1000, "latest_share_pct": 100,
+             "bull_growth_3y_cagr": 5, "base_growth_3y_cagr": 10, "bear_growth_3y_cagr": 15,
+             "drivers": ["y"], "thesis_tag": "turnaround"},
+        ],
+    }
+    r = validate_model(bad_model, raw)
+    assert not r["passed"]
+    assert any("单调" in e for e in r["errors"])
+
+
+def test_segmental_cli_exists():
+    cli = SCRIPTS_DIR / "compute_segmental.py"
+    assert cli.exists(), "v2.10 regression: compute_segmental.py CLI 缺失"
+    content = cli.read_text(encoding="utf-8")
+    assert "cmd_discover" in content and "cmd_validate" in content
+
+
+def test_segmental_command_md_exists():
+    cmd = SCRIPTS_DIR.parent.parent.parent / "commands" / "segmental-model.md"
+    assert cmd.exists(), "v2.10 regression: /segmental-model 命令定义缺失"
+
+
 if __name__ == "__main__":
     # Manual runner — no pytest required
     import inspect
