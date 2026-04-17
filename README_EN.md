@@ -10,10 +10,11 @@
 [![Dimensions](https://img.shields.io/badge/Dimensions-22-brightgreen)]()
 [![Investors](https://img.shields.io/badge/Investors-51-orange)]()
 [![Methods](https://img.shields.io/badge/Institutional%20Methods-17-red)]()
+[![Self-Review](https://img.shields.io/badge/Self--Review-13%20checks-blueviolet)](skills/deep-analysis/scripts/lib/self_review.py)
 
-**A-share / HK / US deep-analysis engine — with first-class Chinese-market coverage Western terminals don't touch.**
+**A-share / HK / US deep-analysis engine — with first-class Chinese-market coverage Western terminals don't touch. v2.9: mechanical self-review gate (13 checks) — can't ship a broken report.**
 
-[Install](#install) · [Usage](#usage) · [Why Western Investors Should Care](#-why-western-investors-should-care) · [Jury Panel](#-51-investor-jury) · [Methods](#-17-institutional-methods) · [Screenshots](#-what-the-report-looks-like) · [FAQ](#-faq)
+[Install](#install) · [Usage](#usage) · [Why Western Investors Should Care](#-why-western-investors-should-care) · [Jury Panel](#-51-investor-jury) · [Methods](#-17-institutional-methods) · [Self-Review Gate 🆕](#-mechanical-self-review-gate-new-in-v29) · [Screenshots](#-what-the-report-looks-like) · [FAQ](#-faq)
 
 **English** | [中文](README.md)
 
@@ -286,6 +287,16 @@ A: Most do. `akshare` / `yfinance` / Eastmoney / XueQiu all work from mainland C
 **Q: I'm outside China, will Chinese data sources work?**
 A: Yes. akshare / Eastmoney / XueQiu / CNInfo / HKEXNews all serve international IPs. No VPN needed. The mx妙想 API (A-share indicators) requires the free `MX_APIKEY` env var.
 
+**Q: How do I know the report I'm about to read is reliable?**
+A: As of v2.9, self-review is **mechanically enforced**. 13 automated checks run before HTML generation; if any critical check fails, the report *physically cannot be shipped*. Check `.cache/<ticker>/_review_issues.json` for any warnings, each with a `suggested_fix`. Every time a new BUG is fixed, a matching check is added — so the same class of bug will be **auto-caught next run, no user feedback needed**.
+
+**Q: I ran analyses on earlier versions — were those reports correct?**
+A: If you analyzed "industrial metals / machine tools / industrial machinery" stocks (like Yunnan Aluminum / 云铝股份 `000807.SZ`) before 2026-04-17, the `7_industry` dim was misclassified as "agricultural food processing" (BUG#R10). Clear the cache and re-run:
+```bash
+rm -rf skills/deep-analysis/scripts/.cache/<ticker>/raw_data.json
+python run.py <ticker> --no-resume
+```
+
 ---
 
 ## 🛠 Architecture in One Diagram
@@ -320,11 +331,51 @@ A: Yes. akshare / Eastmoney / XueQiu / CNInfo / HKEXNews all serve international
    └──────────────────────────────────────────────┘
                        ↓
    ┌──────────────────────────────────────────────┐
+   │   🛡 v2.9 · Mechanical self-review gate       │
+   │   lib/self_review.py — 13 auto checks         │
+   │   critical > 0 → RuntimeError (BLOCK HTML)    │
+   │   agent must fix issues → re-review → pass    │
+   └──────────────────────────────────────────────┘
+                       ↓ only when passed
+   ┌──────────────────────────────────────────────┐
    │   Task 5 · Report assembly                   │
    │   → full-report.html (single file, offline)  │
    │   → share-card.png · war-report.png          │
    └──────────────────────────────────────────────┘
 ```
+
+### 🛡 Mechanical Self-Review Gate (new in v2.9)
+
+Previous versions had soft "HARD-GATE-FINAL-CHECK" — agents could skip, forget, or do half of it. BUG#R10 (a Chinese aluminum producer classified as "agricultural food processing") was caught only after reports were already sent to users. **Soft gates aren't enough — v2.9 enforces mechanically.**
+
+`lib/self_review.py` runs **13 automated checks** before any HTML can be generated. Each check corresponds to a historical BUG:
+
+| severity | check | catches |
+|---|---|---|
+| 🔴 critical | industry mapping sanity | BUG#R10 collision (工业金属 → 农副食品加工) |
+| 🔴 critical | all dims present | wave2 timeout dropped `12_capital_flow` |
+| 🔴 critical | HK kline has data | BUG#R8 Hong Kong kline no fallback |
+| 🔴 critical | HK financials populated | BUG#R7 empty stub |
+| 🔴 critical | panel non-empty, scores sane | panel engine glitches |
+| 🔴 critical | coverage_pct ≥ 60% | data integrity floor |
+| 🔴 critical | no "[PLACEHOLDER]" strings | template leak |
+| 🔴 critical | agent_analysis.json exists & reviewed | agent skipped |
+| 🟡 warning | DCF / Comps not all zero | valuation pipeline check |
+| 🟡 warning | metal stocks have materials data | v2.8.x coverage gap |
+| 🟡 warning | no fabricated narratives (e.g. "Apple supply chain" without evidence) | hallucination guard |
+
+`assemble_report::assemble()` runs `review_all(ticker)` automatically. If `critical_count > 0`, it raises `RuntimeError` — **physically impossible to ship a bad report**. Agent must:
+
+```
+loop:
+  1. python review_stage_output.py <ticker>
+  2. read .cache/<ticker>/_review_issues.json
+  3. for each critical: execute suggested_fix (backfill, refetch, override)
+  4. re-run review
+  5. only when critical_count == 0 → HTML generation proceeds
+```
+
+Every time a new BUG is fixed, a matching `check_*` rule is added to self_review. The same bug class will be **automatically caught on the next run, without needing user feedback.**
 
 ---
 
