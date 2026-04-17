@@ -223,7 +223,14 @@ def _holding_quarters(ticker_code: str, fund_code: str, max_lookback: int = 8) -
     return count, trend
 
 
-def main(ticker: str, limit: int = 50) -> dict:
+def main(ticker: str, limit: int | None = None) -> dict:
+    """Fetch ALL active-equity funds holding this stock.
+
+    v2.4: `limit` default changed from 50 → None (no cap). Hot stocks like 贵州茅台
+    routinely have 100+ active funds holding them; the old hard-cap silently
+    dropped bottom holders, making "抄作业" incomplete. Pass `limit=N` only
+    for quick debugging.
+    """
     ti = parse_ticker(ticker)
     if ti.market != "A":
         return {
@@ -244,25 +251,23 @@ def main(ticker: str, limit: int = 50) -> dict:
 
     active_holders = [h for h in holders if "error" not in h and _is_active_fund(h.get("基金名称", ""))]
     total_funds = len([h for h in holders if "error" not in h])
-    managers: list[dict] = []
+    iter_holders = active_holders if limit is None else active_holders[:limit]
 
-    for row in active_holders[:limit]:
+    # v2.4 · 并行计算每个基金的 5Y 统计（以前 100+ 基金串行跑约 30s）
+    def _build_row(row: dict) -> dict | None:
         fund_code = str(row.get("基金代码", ""))
         fund_name = str(row.get("基金名称", ""))
         if not fund_code:
-            continue
-
+            return None
         stats = cached(fund_code, f"fund_stats_{fund_code}", lambda: compute_fund_stats(fund_code), ttl=TTL_QUARTERLY)
         if not stats or "error" in stats:
             stats = {}
-
         manager_name = fetch_fund_manager_name(fund_code) or "—"
         try:
             position_pct = float(row.get("占市值比例", 0) or row.get("占流通股比例", 0))
         except (ValueError, TypeError):
             position_pct = 0.0
-
-        managers.append({
+        return {
             "name": manager_name,
             "fund_name": fund_name,
             "fund_code": fund_code,
@@ -278,17 +283,49 @@ def main(ticker: str, limit: int = 50) -> dict:
             "peer_rank_pct": 50,
             "nav_history": stats.get("nav_history", []),
             "fund_url": f"https://fund.eastmoney.com/{fund_code}.html",
-        })
+        }
+
+    # 并行度默认 3（低于 akshare 在 Py3.13 下 libffi 并发的不稳定阈值）；
+    # 设置 UZI_FUND_WORKERS=1 可切换为纯串行。
+    import os as _os
+    _workers = int(_os.environ.get("UZI_FUND_WORKERS", "3"))
+    managers: list[dict] = []
+    if _workers <= 1:
+        for row in iter_holders:
+            try:
+                r = _build_row(row)
+                if r is not None:
+                    managers.append(r)
+            except Exception:
+                continue
+    else:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        with ThreadPoolExecutor(max_workers=_workers) as pool:
+            futures = [pool.submit(_build_row, row) for row in iter_holders]
+            for fut in as_completed(futures):
+                try:
+                    r = fut.result()
+                    if r is not None:
+                        managers.append(r)
+                except Exception:
+                    continue
 
     # Sort by 5Y return
     managers.sort(key=lambda m: m.get("return_5y", 0), reverse=True)
 
+    passive_count = max(0, total_funds - len(active_holders))
     return {
         "ticker": ti.full,
         "data": {
             "fund_managers": managers,
             "total_funds_holding": total_funds,
-            "_note": f"共 {total_funds} 家基金持有本股（含 ETF/指数），显示 top {len(managers)} 位主动权益基金经理",
+            "active_funds_count": len(managers),
+            "passive_funds_filtered": passive_count,
+            "_note": (
+                f"共 {total_funds} 家基金持有本股 · "
+                f"收录 {len(managers)} 家主动权益基金（已按 5Y 累计收益排序）· "
+                f"过滤 {passive_count} 家 ETF/指数基金"
+            ),
         },
         "source": "akshare:stock_fund_stock_holder + fund_open_fund_info_em",
         "fallback": False,

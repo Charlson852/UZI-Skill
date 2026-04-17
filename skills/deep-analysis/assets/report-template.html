@@ -1284,6 +1284,92 @@ body::after {
   grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
   gap: 16px;
 }
+
+/* ═══ v2.4 · 紧凑行列表（展开后排名 7+ 的基金显示） ═══ */
+.fund-compact-list {
+  margin-top: 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  max-height: 600px;
+  overflow-y: auto;
+  background: var(--bg-card);
+}
+.fund-compact-head,
+.fund-compact-row {
+  display: grid;
+  grid-template-columns: 44px 40px minmax(0, 2fr) 96px 100px 32px;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.fund-compact-head {
+  background: var(--bg-tinted);
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 11px;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+.fund-compact-row { transition: background .15s ease; }
+.fund-compact-row:hover { background: var(--gold-tint); }
+.fund-compact-row:last-child { border-bottom: none; }
+.fc-rank {
+  width: 36px; height: 28px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 6px;
+  font-family: 'Fira Code', monospace;
+  font-size: 12px;
+  font-weight: 700;
+}
+.fc-avatar {
+  width: 32px; height: 32px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  image-rendering: pixelated;
+  background: #fff;
+  flex-shrink: 0;
+}
+.fc-avatar-ph {
+  display: inline-flex; align-items: center; justify-content: center;
+  font-family: 'Fira Sans', sans-serif;
+  font-size: 14px; font-weight: 800;
+  color: var(--neon-gold);
+  background: var(--gold-tint);
+}
+.fc-info { min-width: 0; overflow: hidden; }
+.fc-name {
+  font-family: 'Fira Sans', sans-serif;
+  font-weight: 700; font-size: 13px;
+  color: var(--text-bright);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.fc-fund {
+  font-family: 'Fira Sans', sans-serif;
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.fc-return, .fc-rank-pct {
+  font-family: 'Fira Code', monospace;
+  font-size: 13px;
+  font-weight: 700;
+  text-align: right;
+}
+.fc-link {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px;
+  border-radius: 6px;
+  text-decoration: none;
+  color: var(--neon-cyan);
+  font-size: 18px;
+  transition: all .15s ease;
+}
+.fc-link:hover { background: var(--gold-tint); color: var(--neon-gold); transform: translateX(2px); }
 .fund-card {
   background: var(--bg-card);
   border: 1px solid var(--border);

@@ -1842,21 +1842,79 @@ def render_fund_managers(managers: list) -> str:
     if len(cards) <= INITIAL_SHOW:
         return header + f'<div class="fund-mgr-grid">{"".join(cards)}</div>'
 
-    # Show first 6, hide rest behind expand button
+    # v2.4 · Top 6 用完整卡片；第 7 位起切换到紧凑行（头像+名字+5Y 收益+同类排名）
+    # 理由：热门股有 100+ 基金持有，全用大卡会把报告撑爆
     visible = "".join(cards[:INITIAL_SHOW])
-    hidden = "".join(cards[INITIAL_SHOW:])
+    compact_rows = [
+        _render_fund_compact_row(m, rank=i + 1 + INITIAL_SHOW)
+        for i, m in enumerate(managers_sorted[INITIAL_SHOW:])
+    ]
     hidden_count = len(cards) - INITIAL_SHOW
     uid = f"fm_{abs(hash(str(len(cards))))}"
 
     return header + f'''
     <div class="fund-mgr-grid">{visible}</div>
-    <div id="{uid}" class="fund-mgr-grid" style="display:none">{hidden}</div>
+    <div id="{uid}" class="fund-compact-list" style="display:none">
+      <div class="fund-compact-head">
+        <span class="fc-h-rank">#</span>
+        <span class="fc-h-avatar"></span>
+        <span class="fc-h-name">基金经理 / 基金</span>
+        <span class="fc-h-metric">5Y 累计</span>
+        <span class="fc-h-metric">同类排名</span>
+        <span class="fc-h-link"></span>
+      </div>
+      {"".join(compact_rows)}
+    </div>
     <div style="text-align:center;margin:16px 0">
-      <button onclick="var el=document.getElementById('{uid}');var btn=this;if(el.style.display==='none'){{el.style.display='grid';btn.textContent='收起 ▲'}}else{{el.style.display='none';btn.textContent='展开剩余 {hidden_count} 位基金经理 ▼'}}"
+      <button onclick="var el=document.getElementById('{uid}');var btn=this;if(el.style.display==='none'){{el.style.display='block';btn.textContent='收起 ▲'}}else{{el.style.display='none';btn.textContent='展开剩余 {hidden_count} 位（按 5Y 收益排名）▼'}}"
         style="background:#f59e0b;color:#fff;border:none;padding:10px 28px;border-radius:8px;font-size:14px;font-weight:700;cursor:pointer;transition:all 0.2s">
-        展开剩余 {hidden_count} 位基金经理 ▼
+        展开剩余 {hidden_count} 位（按 5Y 收益排名）▼
       </button>
     </div>'''
+
+
+def _render_fund_compact_row(m: dict, rank: int) -> str:
+    """One-line strip for fund managers ranked 7+. Used in expanded compact list.
+
+    Reuses color/percentile logic from render_fund_managers so styling stays in sync.
+    """
+    name = m.get("name", "—")
+    fund_name = m.get("fund_name", "—")
+    fund_code = m.get("fund_code", "")
+    avatar = m.get("avatar", "")
+    ret_5y = m.get("return_5y", 0) or 0
+    peer_rank = m.get("peer_rank_pct", 50) or 50
+
+    ret_color = COLOR_BULL if ret_5y > 0 else COLOR_BEAR
+    rank_color = COLOR_BULL if peer_rank < 20 else COLOR_GOLD if peer_rank < 50 else COLOR_BEAR
+
+    # rank badge: top 3 gold, 4-10 silver, rest plain
+    if rank <= 3:
+        badge_style = "background:linear-gradient(135deg,#f59e0b,#d97706);color:#fff"
+    elif rank <= 10:
+        badge_style = "background:#e2e8f0;color:#475569"
+    else:
+        badge_style = "background:#f1f5f9;color:#64748b"
+
+    if avatar:
+        avatar_html = f'<img src="avatars/{avatar}.svg" class="fc-avatar" alt="">'
+    else:
+        avatar_html = f'<div class="fc-avatar fc-avatar-ph">{name[0] if name else "?"}</div>'
+
+    fund_url = m.get("fund_url", f"https://fund.eastmoney.com/{fund_code}.html")
+    sign = "+" if ret_5y > 0 else ""
+
+    return f'''<div class="fund-compact-row">
+  <span class="fc-rank" style="{badge_style}">{rank}</span>
+  {avatar_html}
+  <div class="fc-info">
+    <div class="fc-name">{name}</div>
+    <div class="fc-fund">{fund_name}</div>
+  </div>
+  <span class="fc-return" style="color:{ret_color}">{sign}{ret_5y:.1f}%</span>
+  <span class="fc-rank-pct" style="color:{rank_color}">前 {peer_rank}%</span>
+  <a href="{fund_url}" target="_blank" rel="noopener" class="fc-link" title="查看基金详情">→</a>
+</div>'''
 
 
 def render_debate_rounds(debate: dict) -> str:
