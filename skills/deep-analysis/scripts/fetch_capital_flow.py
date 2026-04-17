@@ -1,18 +1,18 @@
 """Dimension 12 · 资金面 (北向 / 融资融券 / 股东户数 / 主力 / 限售解禁 / 大宗交易).
 
-补全：原方案要求覆盖
-  • 北向/南向资金近 20 日净买卖
-  • 融资融券余额趋势
-  • 股东户数近 3 季度变化
-  • 大宗交易折溢价
-  • 限售股解禁时间表
-  • 主力资金流入流出
-全部已实现。
+codex-develop:
+- 避免误用全市场超重接口拖垮 A 股 stage1
+- 机构持仓历史改走单票接口
+- 解禁信息改走个股 queue 接口而非整年全市场明细
 """
+from __future__ import annotations
+
 import json
 import sys
+from datetime import datetime, timedelta
 
 import akshare as ak  # type: ignore
+import requests
 from lib import data_sources as ds
 from lib.market_router import parse_ticker
 
@@ -22,6 +22,90 @@ def _safe(fn, default):
         return fn()
     except Exception as e:
         return {"error": str(e)} if isinstance(default, dict) else default
+
+
+def _last_n_quarters(n: int = 8) -> list[tuple[str, str]]:
+    """Return recent quarters in Sina format plus a compact label.
+
+    Example: [("20241", "24Q1"), ("20242", "24Q2"), ...]
+    """
+    now = datetime.now()
+    cur_q = ((now.month - 1) // 3) + 1
+    year = now.year
+    out: list[tuple[str, str]] = []
+    for i in range(n):
+        q = cur_q - i
+        y = year
+        while q <= 0:
+            q += 4
+            y -= 1
+        out.append((f"{y}{q}", f"{str(y)[2:]}Q{q}"))
+    out.reverse()
+    return out
+
+
+def _recent_trade_dates(days: int = 7) -> list[str]:
+    today = datetime.now().date()
+    out: list[str] = []
+    cursor = today
+    while len(out) < days:
+        if cursor.weekday() < 5:
+            out.append(cursor.strftime("%Y%m%d"))
+        cursor -= timedelta(days=1)
+    out.reverse()
+    return out
+
+
+def _fetch_margin_recent(ti) -> list[dict]:
+    """Use lightweight market summaries instead of heavy full-market detail tables."""
+    try:
+        if ti.full.endswith("SH"):
+            dates = _recent_trade_dates(5)
+            start_date, end_date = dates[0], dates[-1]
+            df = ak.stock_margin_sse(start_date=start_date, end_date=end_date)
+            return [] if df is None or df.empty else df.tail(5).to_dict("records")
+
+        rows: list[dict] = []
+        for date in reversed(_recent_trade_dates(8)):
+            try:
+                df = ak.stock_margin_szse(date=date)
+                if df is None or df.empty:
+                    continue
+                rec = df.iloc[0].to_dict()
+                rec["信用交易日期"] = date
+                rows.append(rec)
+                if len(rows) >= 5:
+                    break
+            except Exception:
+                continue
+        rows.reverse()
+        return rows
+    except Exception:
+        return []
+
+
+def _fetch_holder_count_history(code: str, limit: int = 8) -> list[dict]:
+    """Fetch shareholder-count history for a single stock via Eastmoney filtered query."""
+    url = "https://datacenter-web.eastmoney.com/api/data/v1/get"
+    params = {
+        "sortColumns": "END_DATE,HOLD_NOTICE_DATE",
+        "sortTypes": "-1,-1",
+        "pageSize": str(limit),
+        "pageNumber": "1",
+        "reportName": "RPT_HOLDERNUM_DET",
+        "columns": (
+            "SECURITY_CODE,SECURITY_NAME_ABBR,END_DATE,HOLD_NOTICE_DATE,HOLDER_NUM,PRE_HOLDER_NUM,"
+            "HOLDER_NUM_CHANGE,HOLDER_NUM_RATIO,AVG_HOLD_NUM,AVG_MARKET_CAP,TOTAL_MARKET_CAP"
+        ),
+        "filter": f'(SECURITY_CODE="{code}")',
+        "source": "WEB",
+        "client": "WEB",
+    }
+    r = requests.get(url, params=params, timeout=15)
+    r.raise_for_status()
+    data_json = r.json()
+    result = (((data_json or {}).get("result") or {}).get("data")) or []
+    return result[:limit]
 
 
 def main(ticker: str) -> dict:
@@ -69,45 +153,24 @@ def main(ticker: str) -> dict:
 
     north = ds.fetch_northbound(ti)
 
-    margin = _safe(
-        lambda: ak.stock_margin_detail_szse(date=None).head(5).to_dict("records") if ti.full.endswith("SZ")
-        else ak.stock_margin_detail_sse(date=None).head(5).to_dict("records"),
-        [],
-    )
+    margin = _safe(lambda: _fetch_margin_recent(ti), [])
 
-    holders = _safe(
-        lambda: ak.stock_zh_a_gdhs(symbol=ti.code).head(8).to_dict("records"),
-        [],
-    )
+    holders = _safe(lambda: _fetch_holder_count_history(ti.code, limit=8), [])
 
     main_flow = _safe(
         lambda: ak.stock_individual_fund_flow(stock=ti.code, market=ti.full[-2:].lower()).tail(20).to_dict("records"),
         [],
     )
 
-    # 大宗交易
-    block_trades = _safe(
-        lambda: ak.stock_dzjy_mrtj(start_date="20260101", end_date="20261231").pipe(
-            lambda df: df[df["证券代码"] == ti.code].head(20).to_dict("records")
-        ),
-        [],
-    )
+    # 大宗交易：保守降级。历史全市场扫描过重，先不让它拖垮 stage1。
+    block_trades = []
 
-    # 限售股解禁 (近一年)
-    unlock = _safe(
-        lambda: ak.stock_restricted_release_summary_em(symbol="近一年").pipe(
-            lambda df: df[df["代码"] == ti.code].to_dict("records")
-        ),
-        [],
-    )
-
-    # 解禁日历前瞻 12 个月
+    # 限售股解禁：使用个股 queue 接口，避免整年全市场明细扫描。
     unlock_future = _safe(
-        lambda: ak.stock_restricted_release_detail_em(start_date="20260101", end_date="20261231").pipe(
-            lambda df: df[df["代码"] == ti.code].head(20).to_dict("records")
-        ),
+        lambda: ak.stock_restricted_release_queue_em(symbol=ti.code).head(20).to_dict("records"),
         [],
     )
+    unlock = unlock_future[:10] if unlock_future else []
 
     # Normalize unlock_schedule for viz
     def _month_label(d):
@@ -129,32 +192,32 @@ def main(ticker: str) -> dict:
         except (ValueError, TypeError):
             pass
 
-    # 机构持仓 8 季度历史 (stock_report_fund_hold_detail)
+    # 机构持仓 8 季度历史：改走单票接口，避免误用/扫描全市场大表。
     inst_history: dict = {"quarters": [], "fund": [], "qfii": [], "shehui": []}
     try:
-        from datetime import datetime as _dt, timedelta as _td
-        # Get last 8 quarters
-        today = _dt.now()
-        quarters = []
-        for i in range(8):
-            y = today.year
-            q = ((today.month - 1) // 3) - i
-            while q < 0:
-                q += 4
-                y -= 1
-            q_dates = ["0331", "0630", "0930", "1231"]
-            quarters.append((f"{y}{q_dates[q]}", f"{str(y)[2:]}Q{q+1}"))
-        quarters.reverse()
-        inst_history["quarters"] = [q[1] for q in quarters]
+        quarters = _last_n_quarters(8)
+        inst_history["quarters"] = [label for _, label in quarters]
 
-        for q_date, q_label in quarters:
+        for quarter_code, _quarter_label in quarters:
             fund_pct = qfii_pct = shehui_pct = 0.0
             try:
-                df_fund = ak.stock_report_fund_hold_detail(symbol="基金持仓", date=q_date)
-                if df_fund is not None and not df_fund.empty and "股票代码" in df_fund.columns:
-                    sub = df_fund[df_fund["股票代码"].astype(str) == ti.code]
-                    if not sub.empty and "占流通股比例" in sub.columns:
-                        fund_pct = float(sub["占流通股比例"].sum())
+                df_inst = ak.stock_institute_hold_detail(stock=ti.code, quarter=quarter_code)
+                if df_inst is not None and not df_inst.empty:
+                    type_col = "持股机构类型" if "持股机构类型" in df_inst.columns else None
+                    pct_col = "占流通股比例" if "占流通股比例" in df_inst.columns else None
+                    if type_col and pct_col:
+                        for _, row in df_inst.iterrows():
+                            inst_type = str(row.get(type_col, "")).strip()
+                            try:
+                                pct = float(row.get(pct_col, 0) or 0)
+                            except (TypeError, ValueError):
+                                pct = 0.0
+                            if "基金" in inst_type:
+                                fund_pct += pct
+                            elif "QFII" in inst_type:
+                                qfii_pct += pct
+                            elif "社保" in inst_type:
+                                shehui_pct += pct
             except Exception:
                 pass
             inst_history["fund"].append(round(fund_pct, 2))
@@ -215,7 +278,7 @@ def main(ticker: str) -> dict:
             "unlock_schedule": unlock_schedule,
             "institutional_history": inst_history,
         },
-        "source": "akshare:multi (north + margin + gdhs + fund_flow + dzjy + restricted_release + fund_hold_detail)",
+        "source": "akshare+eastmoney:multi (north + margin_summary + holdernum_filtered + fund_flow + restricted_release_queue + stock_institute_hold_detail)",
         "fallback": False,
     }
 

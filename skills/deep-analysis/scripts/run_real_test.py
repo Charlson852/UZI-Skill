@@ -283,8 +283,9 @@ def collect_raw_data(ticker: str, max_workers: int = 6, resume: bool = True) -> 
 
     # v2.6 · wave3 同样加 60s timeout per fetcher（fund_holders 默认抓全量，可能慢）
     from concurrent.futures import TimeoutError as _FutureTimeout
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        wave3_futures = {pool.submit(_fund_holders): "fund_managers", pool.submit(_similar_stocks): "similar_stocks"}
+    pool = ThreadPoolExecutor(max_workers=2)
+    wave3_futures = {pool.submit(_fund_holders): "fund_managers", pool.submit(_similar_stocks): "similar_stocks"}
+    try:
         try:
             for fut in as_completed(wave3_futures, timeout=180):
                 key_pending = wave3_futures[fut]
@@ -301,9 +302,14 @@ def collect_raw_data(ticker: str, max_workers: int = 6, resume: bool = True) -> 
                     print(f"    ✗ {key_pending} crash: {type(e).__name__}: {str(e)[:60]}")
         except _FutureTimeout:
             for f, k in wave3_futures.items():
-                if not f.done() and k not in raw:
-                    raw[k] = []
+                if not f.done():
+                    f.cancel()
+                    if k not in raw:
+                        raw[k] = []
             print(f"    ⏱  wave3 overall timeout")
+    finally:
+        # v2.9.2-codex-develop: wave3 timeout 后不能继续等待挂起的 bonus fetcher。
+        pool.shutdown(wait=False, cancel_futures=True)
     wave3_elapsed = time.time() - wave3_start
     print(f"  [wave 3] done in {wave3_elapsed:.1f}s")
 
@@ -1820,10 +1826,10 @@ def main(ticker: str = "002273.SZ"):
         stage2(ticker)            # 生成报告 (自动合并 agent_analysis)
     """
     result = stage1(ticker)
-    # v2.3 · stage1 可能因中文名无法解析而早退，此时不能继续 stage2
-    if isinstance(result, dict) and result.get("status") == "name_not_resolved":
-        print("\n⚠️  因股票名无法解析，跳过 stage2（不会生成空报告）")
-        return
+    # v2.3 / codex-develop · stage1 可能因名称解析或非个股早退，此时不能继续 stage2
+    if isinstance(result, dict) and result.get("status") in {"name_not_resolved", "non_stock_security"}:
+        print("\n⚠️  stage1 已早退，跳过 stage2（不会生成空报告）")
+        return result
     report_path = stage2(ticker)
     print(f"\n🎯 完整流程结束 · 报告: {report_path}")
 

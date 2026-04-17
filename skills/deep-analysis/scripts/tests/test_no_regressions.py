@@ -645,6 +645,76 @@ def test_stage1_early_exits_on_etf():
         "v2.9.2 regression: ETF 持仓拉取接口未使用"
 
 
+def test_main_early_exits_on_non_stock_security():
+    """codex-develop: run_real_test.main 在 ETF/LOF/可转债早退时不能继续 stage2"""
+    src = (SCRIPTS_DIR / "run_real_test.py").read_text(encoding="utf-8")
+    idx = src.find("def main(")
+    assert idx > 0, "run_real_test.main missing"
+    block = src[idx:idx + 1200]
+    assert "non_stock_security" in block and "跳过 stage2" in block, \
+        "codex-develop regression: main 必须识别 non_stock_security 并跳过 stage2"
+
+
+def test_run_py_handles_non_stock_security():
+    """codex-develop: run.py 直跑 ETF 时不能在 stage1 早退后继续找报告"""
+    src = (SCRIPTS_DIR.parent.parent.parent / "run.py").read_text(encoding="utf-8")
+    assert "non_stock_security" in src, \
+        "codex-develop regression: run.py 必须识别 non_stock_security 并直接返回"
+
+
+def test_run_py_supports_strict_agent_review_flag():
+    """codex-develop: 直跑默认允许 script-only，必要时可显式打开严格 agent gate"""
+    src = (SCRIPTS_DIR.parent.parent.parent / "run.py").read_text(encoding="utf-8")
+    assert "--strict-agent-review" in src, \
+        "codex-develop regression: run.py 缺少 strict agent review 开关"
+    assert "UZI_REQUIRE_AGENT_REVIEW" in src, \
+        "codex-develop regression: run.py 必须显式设置 UZI_REQUIRE_AGENT_REVIEW"
+
+
+def test_self_review_agent_gate_is_configurable():
+    """codex-develop: agent_analysis 缺失在非 strict 模式下应降级为 warning"""
+    src = (SCRIPTS_DIR / "lib" / "self_review.py").read_text(encoding="utf-8")
+    assert "strict_agent_review" in src and "UZI_REQUIRE_AGENT_REVIEW" in src, \
+        "codex-develop regression: self_review 必须支持可配置的 agent gate"
+    assert 'severity=sev' in src or 'severity = sev' in src, \
+        "codex-develop regression: check_agent_analysis_exists 应按 strict 模式切换 severity"
+
+
+def test_fetch_capital_flow_uses_single_stock_fast_paths():
+    """codex-develop: capital_flow 不能再误用全市场/错误接口拖垮 A 股"""
+    src = (SCRIPTS_DIR / "fetch_capital_flow.py").read_text(encoding="utf-8")
+    assert "stock_institute_hold_detail" in src, \
+        "codex-develop regression: institution history 必须改用单票 stock_institute_hold_detail"
+    assert "stock_restricted_release_queue_em" in src, \
+        "codex-develop regression: 解禁应优先走个股 queue 接口"
+    assert "_fetch_margin_recent" in src and "_fetch_holder_count_history" in src, \
+        "codex-develop regression: capital_flow 必须提供轻量 margin/holder fast path"
+    assert "stock_margin_detail_sse" not in src and "stock_margin_detail_szse" not in src, \
+        "codex-develop regression: 不应再调用全市场 margin detail 接口"
+    assert "stock_zh_a_gdhs(symbol=ti.code)" not in src, \
+        "codex-develop regression: 不应再把 stock_zh_a_gdhs 当作单票接口误用"
+    assert 'stock_report_fund_hold_detail(symbol="基金持仓"' not in src, \
+        "codex-develop regression: 不应再误用 stock_report_fund_hold_detail(symbol='基金持仓')"
+
+
+def test_fetch_fund_holders_uses_recent_section_fast_path():
+    """codex-develop: fund_holders 默认不能再扫新浪全历史区段"""
+    src = (SCRIPTS_DIR / "fetch_fund_holders.py").read_text(encoding="utf-8")
+    assert "_fetch_recent_holding_funds_from_sina" in src, \
+        "codex-develop regression: fund_holders 必须提供新浪最近季度快路径"
+    assert "max_sections: int = 2" in src, \
+        "codex-develop regression: 快路径必须限制最近季度区段数量"
+    assert "stock_fund_stock_holder(symbol=ticker_code)" in src, \
+        "codex-develop regression: 慢的 akshare helper 只能作为 fallback 保留"
+
+
+def test_wave3_timeout_does_not_block_stage2():
+    """codex-develop: wave3 超时后必须立即释放线程池，不能假超时真卡死"""
+    src = (SCRIPTS_DIR / "run_real_test.py").read_text(encoding="utf-8")
+    assert "pool.shutdown(wait=False, cancel_futures=True)" in src, \
+        "codex-develop regression: wave3 timeout 后必须非阻塞 shutdown"
+
+
 if __name__ == "__main__":
     # Manual runner — no pytest required
     import inspect

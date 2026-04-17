@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Any
@@ -315,20 +316,30 @@ def check_agent_analysis_exists(ctx: dict) -> list[Issue]:
     """agent_analysis.json 是否写回（HARD-GATE 的机械化版本）"""
     issues = []
     ag = ctx.get("ag")
+    strict = bool(ctx.get("strict_agent_review"))
+    sev = "critical" if strict else "warning"
     if ag is None:
         issues.append(Issue(
-            severity="critical", category="self-check", dim="agent_analysis",
+            severity=sev, category="self-check", dim="agent_analysis",
             issue="agent_analysis.json 不存在，agent 未介入",
             evidence="file not found",
-            suggested_fix="agent 必须读 panel.json + raw_data.json 后写 agent_analysis.json（含 dim_commentary / panel_insights / great_divide_override）",
+            suggested_fix=(
+                "agent 必须读 panel.json + raw_data.json 后写 agent_analysis.json（含 dim_commentary / panel_insights / great_divide_override）"
+                if strict else
+                "当前为 script-only 直跑模式，可继续生成报告；若要严格 gate，请设置 UZI_REQUIRE_AGENT_REVIEW=1 并补写 agent_analysis.json"
+            ),
         ))
         return issues
     if not ag.get("agent_reviewed"):
         issues.append(Issue(
-            severity="critical", category="self-check", dim="agent_analysis",
+            severity=sev, category="self-check", dim="agent_analysis",
             issue="agent_analysis.agent_reviewed != True",
             evidence=f"agent_reviewed={ag.get('agent_reviewed')}",
-            suggested_fix="agent 核查完内容后必须显式设置 agent_reviewed: true",
+            suggested_fix=(
+                "agent 核查完内容后必须显式设置 agent_reviewed: true"
+                if strict else
+                "当前为 script-only 直跑模式，可继续生成报告；若要严格 gate，请让 agent 写回并设置 agent_reviewed: true"
+            ),
         ))
     # dim_commentary 覆盖率
     dc = ag.get("dim_commentary") or {}
@@ -505,6 +516,7 @@ def review_all(ticker: str, cache_root: str | None = None) -> dict:
     ctx = {
         "ticker": ticker, "market": market,
         "raw": raw, "syn": syn, "panel": panel, "ag": ag, "dims": dims,
+        "strict_agent_review": os.environ.get("UZI_REQUIRE_AGENT_REVIEW") == "1",
     }
 
     all_issues: list[Issue] = []

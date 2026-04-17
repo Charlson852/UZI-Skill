@@ -38,8 +38,11 @@ import math
 import sys
 import traceback
 from datetime import datetime
+from io import StringIO
 
 import akshare as ak  # type: ignore
+import pandas as pd  # type: ignore
+import requests
 from lib.cache import cached, TTL_QUARTERLY
 from lib.market_router import parse_ticker
 
@@ -69,38 +72,107 @@ def _recent_quarter_date() -> str:
     return f"{y - 1}1231"
 
 
+def _fetch_recent_holding_funds_from_sina(ticker_code: str, max_sections: int = 2) -> list[dict]:
+    """Fast path: parse only the latest few quarter sections from Sina's holder page.
+
+    ak.stock_fund_stock_holder() parses the entire historical page and can become
+    extremely slow for heavily held stocks like 贵州茅台. For the panel/report we
+    mainly care about recent holdings, so parse only the latest sections.
+    """
+    url = f"https://vip.stock.finance.sina.com.cn/corp/go.php/vCI_FundStockHolder/stockid/{ticker_code}.phtml"
+    r = requests.get(url, timeout=15)
+    r.raise_for_status()
+    tables = pd.read_html(StringIO(r.text))
+    if len(tables) <= 13:
+        return []
+
+    temp_df = tables[13].iloc[:, :6].copy()
+    temp_df.columns = [*range(6)]
+    boundaries = temp_df[temp_df.iloc[:, 0].astype(str).str.find("截止日期") == 0].index.tolist()
+    if not boundaries:
+        return []
+    boundaries = boundaries[: max_sections + 1] + [len(temp_df)]
+
+    out_frames: list[pd.DataFrame] = []
+    section_count = min(max_sections, len(boundaries) - 1)
+    for i in range(section_count):
+        truncated_df = temp_df.iloc[boundaries[i] : boundaries[i + 1], :].dropna(how="all")
+        if truncated_df.empty or len(truncated_df) < 3:
+            continue
+        temp_truncated = truncated_df.iloc[2:, :].copy()
+        temp_truncated.reset_index(inplace=True, drop=True)
+        concat_df = pd.concat(objs=[temp_truncated, truncated_df.iloc[0, 1:]], axis=1)
+        concat_df.columns = truncated_df.iloc[1, :].tolist() + ["截止日期"]
+        concat_df["截止日期"] = concat_df["截止日期"].ffill().bfill()
+        out_frames.append(concat_df)
+
+    if not out_frames:
+        return []
+
+    big_df = pd.concat(out_frames, axis=0, ignore_index=True)
+    big_df.dropna(how="all", inplace=True)
+    big_df.reset_index(drop=True, inplace=True)
+    big_df.columns = [
+        "基金名称",
+        "基金代码",
+        "持仓数量",
+        "占流通股比例",
+        "持股市值",
+        "占净值比例",
+        "截止日期",
+    ]
+    big_df["基金代码"] = big_df["基金代码"].astype(str).str.extract(r"(\d+)").fillna("")
+    big_df["持仓数量"] = pd.to_numeric(big_df["持仓数量"], errors="coerce")
+    big_df["占流通股比例"] = pd.to_numeric(big_df["占流通股比例"], errors="coerce")
+    big_df["持股市值"] = pd.to_numeric(big_df["持股市值"], errors="coerce")
+    big_df["占净值比例"] = pd.to_numeric(big_df["占净值比例"], errors="coerce")
+    big_df["截止日期"] = pd.to_datetime(big_df["截止日期"], errors="coerce")
+    big_df.sort_values(["截止日期", "持股市值"], ascending=[False, False], inplace=True)
+    big_df.drop_duplicates(subset=["基金代码"], keep="first", inplace=True)
+    return big_df.to_dict("records")
+
+
 def fetch_holding_funds(ticker_code: str, date: str = "") -> list[dict]:
     """Which funds hold this stock.
 
-    Primary: stock_fund_stock_holder(symbol=code) — direct per-stock lookup, returns
-    all funds holding this stock ordered by 持仓市值 desc. Bypasses the broken
-    stock_report_fund_hold_detail endpoint.
+    Primary: parse the latest few Sina holder sections directly, avoiding the
+    very slow "parse all historical quarters" path inside ak.stock_fund_stock_holder.
+    Secondary fallback keeps the previous akshare helper.
     """
     try:
-        df = ak.stock_fund_stock_holder(symbol=ticker_code)
-        if df is None or df.empty:
+        rows = _fetch_recent_holding_funds_from_sina(ticker_code)
+        if not rows:
             return []
-        # Normalize column names to a stable shape
         out = []
-        for _, row in df.iterrows():
+        for row in rows:
             out.append({
                 "基金名称": row.get("基金名称"),
                 "基金代码": str(row.get("基金代码", "")),
                 "持仓数量": row.get("持仓数量"),
                 "占流通股比例": row.get("占流通股比例"),
                 "持股市值": row.get("持股市值"),
-                "占市值比例": row.get("占市值比例"),
+                "占市值比例": row.get("占净值比例"),
                 "截止日期": str(row.get("截止日期", "")),
             })
         return out
     except Exception as e:
-        # Fallback: try the original but likely broken
+        # Fallback: try the previous helper
         try:
-            df = ak.stock_report_fund_hold_detail(symbol="基金持仓", date=date or "20241231")
+            df = ak.stock_fund_stock_holder(symbol=ticker_code)
             if df is None or df.empty:
                 return []
-            sub = df[df.get("股票代码", "").astype(str) == ticker_code]
-            return sub.head(20).to_dict("records")
+            out = []
+            for _, row in df.iterrows():
+                out.append({
+                    "基金名称": row.get("基金名称"),
+                    "基金代码": str(row.get("基金代码", "")),
+                    "持仓数量": row.get("持仓数量"),
+                    "占流通股比例": row.get("占流通股比例"),
+                    "持股市值": row.get("持股市值"),
+                    "占市值比例": row.get("占净值比例"),
+                    "截止日期": str(row.get("截止日期", "")),
+                })
+            return out
         except Exception:
             return [{"error": f"both fund lookup methods failed: {e}"}]
 
@@ -328,7 +400,7 @@ def main(ticker: str, limit: int | None = None) -> dict:
                 f"过滤 {passive_count} 家 ETF/指数基金"
             ),
         },
-        "source": "akshare:stock_fund_stock_holder + fund_open_fund_info_em",
+        "source": "sina:recent_holder_sections + akshare:stock_fund_stock_holder(fallback) + fund_open_fund_info_em",
         "fallback": False,
     }
 

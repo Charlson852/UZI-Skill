@@ -250,6 +250,8 @@ def main():
                         help="v2.6 · 强制重抓所有 fetcher（默认 resume：复用 .cache/{ticker}/raw_data.json 已有维度）")
     parser.add_argument("--enable-xueqiu-login", action="store_true",
                         help="v2.7.1 · 启用 XueQiu Playwright 登录态抓取实盘比赛持仓（首次需 `python -m lib.xueqiu_browser login`）")
+    parser.add_argument("--strict-agent-review", action="store_true",
+                        help="codex-develop · 启用严格 agent review gate（缺少 agent_analysis.json 时拒绝出报告）")
     args = parser.parse_args()
 
     # v2.3 · --force-name 直接覆盖
@@ -261,6 +263,9 @@ def main():
     if args.enable_xueqiu_login:
         os.environ["UZI_XQ_LOGIN"] = "1"
         print("🔓 启用 XueQiu 登录态（19_contests 维度抓实盘组合）")
+
+    # codex-develop 默认支持 script-only 直跑；必要时可显式打开严格 agent gate。
+    os.environ["UZI_REQUIRE_AGENT_REVIEW"] = "1" if args.strict_agent_review else "0"
 
     env = detect_environment()
 
@@ -350,7 +355,9 @@ def main():
             if resolved:
                 args.ticker = resolved
     else:
-        run_analysis(args.ticker)
+        result = run_analysis(args.ticker)
+        if isinstance(result, dict) and result.get("status") in {"name_not_resolved", "non_stock_security"}:
+            return
 
     # 找到生成的报告
     from datetime import datetime
