@@ -293,23 +293,46 @@ A:
   - pipeline.collect → 写 raw_data.json → legacy stage1 scoring → legacy stage2 render
 - `UZI_PIPELINE=1` feature flag 仍是 opt-in · 默认用 legacy 路径
 
-### ⏳ Phase 6b（未来 session）· 真正迁移 score/synthesize 内部逻辑
-目前是 delegate wrapper · 内部调 legacy · 真正的内部迁移还没做：
-- Rules 引擎 + 51 评委打分挪进 `pipeline/score.py`（而不是调 rrt.stage1）
-- stage2 merge + HTML 组装挪进 `pipeline/synthesize.py`（而不是调 rrt.stage2）
+### ✅ Phase 6b（已完成）· dark-launch 对比工具
+- `pipeline/compare.py`
+  - `compare_raw_data(legacy, pipeline)` · 字段级 diff + 宽松比较
+  - `_values_match` 等价规则：空值（None/""/"—"/"n/a"）互等 · 数值 0.01 tolerance
+  - `KEY_FIELDS_BY_DIM` · 声明每 dim 的关键字段（其他字段忽略）
+  - pipeline-only 字段（quality/data_gaps/latency_ms）不参与 diff
+- 使用方式：
+  ```bash
+  python3 run.py 300470.SZ --no-resume
+  cp skills/deep-analysis/scripts/.cache/300470.SZ/raw_data.json /tmp/legacy_raw.json
+  UZI_PIPELINE=1 python3 run.py 300470.SZ --no-resume
+  python3 -c "from lib.pipeline.compare import compare_files; import json; print(json.dumps(compare_files('/tmp/legacy_raw.json', 'skills/deep-analysis/scripts/.cache/300470.SZ/raw_data.json'), ensure_ascii=False, indent=2))"
+  ```
+
+### ✅ Phase 7（已完成）· run.py 接入 UZI_PIPELINE=1 opt-in
+- `run.py::main()` 顶部检测 `UZI_PIPELINE=1` · 走 `pipeline.run_pipeline`
+- pipeline 异常时 `_pipeline_succeeded=False` 回退 legacy · **绝不中断业务**
+- pipeline 成功后跳过 legacy stage1/stage2 · 只用 pipeline 产出
+- 默认（env 未设）仍走 legacy · 向后 100% 兼容
+
+### ⏳ Phase 6c / 8（最后 · 需用户 UAT 验证后做）
+
+**Phase 6c · 真正迁移 score/synthesize 内部逻辑**（high risk · 不在本 session）
+- Rules 引擎 + 51 评委打分挪进 `pipeline/score.py`（不再调 rrt.stage1）
+- stage2 merge + HTML 组装挪进 `pipeline/synthesize.py`（不再调 rrt.stage2）
 - Bull-Bear 辩论 + agent_analysis merge + 机械自查 gate
-- **高风险** · 需精确对齐 legacy 行为 · 建议逐小步推进
+- **推荐**：先用 Phase 6b 的 compare 工具跑 5-10 只样本票 · 累计 diff rate < 1% 再做
 
-### ⏳ Phase 7（未来 session）· 切换默认入口
-- run.py 里检测 `UZI_PIPELINE=1` 切换走 pipeline.run_pipeline
-- 双盲对比：同股票新老流程产出 HTML 对比 · 关键字段 diff 为空
-- 先 dark-launch 一段时间 · 用户反馈无异常再考虑切默认
-
-### ⏳ Phase 8（未来 session）· 瘦身 + 合 main
-- 删 22 个 `fetch_X.py` · adapter 里内化 fetch 逻辑（当前是 adapter 调老 main）
-- `run_real_test.py` 瘦身到 < 200 行（只保留 stage1/stage2 legacy 调度骨架）
-- `assemble_report.py` 瘦身到 < 400 行（删已迁 section 的 render 函数）
+**Phase 8 · 删老代码 + 合 main**（terminal · 需 UAT 通过）
+- 删 22 个 `fetch_X.py` · adapter 里内化 fetch 逻辑
+- `run_real_test.py` 瘦身到 < 200 行
+- `assemble_report.py` 瘦身到 < 400 行
 - merge `refactor/v3.0.0-pipeline-architecture` → `main` · tag v3.0.0
+- **触发条件**：至少 20 只股票连续 UAT 通过 · 无回归报告 · 用户确认切换
+
+## 状态总结
+
+- ✅ **Phase 1-7 完成** · 所有管道基础设施到位 · 默认走 legacy · opt-in 走 pipeline
+- ⏳ **Phase 6c + 8 需 UAT 验证后再做** · 这两步涉及删老代码或内部逻辑重写 · 风险最高
+- **本分支不合 main** 直到 Phase 6c/8 完成 · 业务流程完全不受影响
 
 ## 老入口保持工作
 

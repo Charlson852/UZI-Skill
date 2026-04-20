@@ -355,11 +355,28 @@ def main():
 
     # 运行分析（抑制 run_real_test 内部的自动开浏览器）
     os.environ["UZI_NO_AUTO_OPEN"] = "1"
+
+    # v3.0.0 · Phase 7 · opt-in 管道入口 · UZI_PIPELINE=1 走 pipeline.run_pipeline · 默认 legacy
+    # 新管道当前是 delegate 模式（collect 新 · scoring/synth 仍调 legacy）· 安全切换期
+    _pipeline_succeeded = False
+    if os.environ.get("UZI_PIPELINE") == "1":
+        try:
+            from lib.pipeline.run import run_pipeline
+            print("🚀 [run.py] UZI_PIPELINE=1 · 走新管道（delegate 模式）")
+            run_pipeline(args.ticker, resume=not args.no_resume)
+            _pipeline_succeeded = True
+        except Exception as e:
+            print(f"⚠️  [run.py] pipeline 异常 · 回退 legacy: {type(e).__name__}: {str(e)[:100]}")
+            _pipeline_succeeded = False
+
     from run_real_test import main as run_analysis, stage1 as _stage1, stage2 as _stage2
 
     # v2.3 · 先过 stage1，捕获中文名解析失败场景，不静默跑出空报告
     from lib.market_router import is_chinese_name
-    if is_chinese_name(args.ticker) and not args.force_name:
+    if _pipeline_succeeded:
+        # pipeline 成功 · 报告已生成 · 跳过 legacy · 直接 fallthrough 到 report dir 查找
+        print("   → 走 pipeline · skip legacy stage1/stage2")
+    elif is_chinese_name(args.ticker) and not args.force_name:
         stage1_result = _stage1(args.ticker)
         # v2.10.4 · ETF/指数/可转债早退：stage1 已写 _resolve_error.json + 成分股清单
         if isinstance(stage1_result, dict) and stage1_result.get("status") == "non_stock_security":
