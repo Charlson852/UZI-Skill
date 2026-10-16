@@ -553,21 +553,19 @@ def test_top3_bears_rendered():
 
 
 def test_consensus_neutral_weighted_formula():
-    """panel_consensus 必须对 neutral 加权计入（v2.9.1 引入半权 0.5，v2.11 校准到 0.6）"""
-    src = (((SCRIPTS_DIR / "run_real_test.py").read_text(encoding="utf-8")) + "\n" + (SCRIPTS_DIR / "lib" / "pipeline" / "score_fns.py").read_text(encoding="utf-8"))
-    # 找 generate_panel 函数体
-    fn_idx = src.find("def generate_panel")
-    fn_end = src.find("\ndef ", fn_idx + 100)
-    body = src[fn_idx:fn_end]
-    # 公式必须对 neutral 加权（v2.11 起用常量 NEUTRAL_WEIGHT）
-    assert ("NEUTRAL_WEIGHT * neutral" in body or
-            "0.6 * neutral" in body or
-            "0.5 * neutral" in body or
-            "0.5*neutral" in body), \
-        "regression: consensus 公式未对 neutral 加权计入"
-    # 老的裸 bullish-only 不该再单独出现
-    assert 'sig_dist["bullish"] / max(' not in body, \
-        "v2.9.1 regression: 仍有老的 bullish-only 公式"
+    """Neutral votes retain 0.6 weight after scoring/override aggregation."""
+    from lib.pipeline.score_fns import _summarize_panel
+    members = [
+        {"investor_id": signal, "name": signal, "group": "A", "signal": signal,
+         "score": score, "headline": signal,
+         "fail": [{"name": "verified fixture evidence"}] if signal == "bearish" else []}
+        for signal, score in [("bullish", 100), ("neutral", 50), ("bearish", 0)]
+    ]
+    panel = _summarize_panel(members, "TEST")
+    expected_vote = (1 + 0.6) / 3 * 100
+    expected_raw = 0.65 * 50 + 0.35 * expected_vote
+    assert abs(panel["consensus_formula"]["vote_weighted"] - expected_vote) < 0.01
+    assert abs(panel["panel_consensus"] - (50 + (expected_raw - 50) * 1.3)) < 0.1
 
 
 def test_debate_no_hardcoded_default_avatars():

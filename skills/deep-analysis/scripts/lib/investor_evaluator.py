@@ -20,6 +20,7 @@ Output schema:
 from __future__ import annotations
 
 from lib.investor_db import by_id
+from lib.panel_evidence import model_gap
 
 import os
 from typing import Any
@@ -81,15 +82,16 @@ def _is_youzi_out_of_range(investor_id: str, features: dict) -> tuple[bool, str]
     mc = features.get("market_cap") or 0
     if not mc and features.get("market_cap_yi"):
         mc = float(features["market_cap_yi"]) * 1e8
-    probe = dict(features)
-    probe["market_cap"] = mc
+    # Scope checks only capacity. Known trading-condition failures are scored
+    # by the rule engine; they are not market-capacity mismatches.
+    probe = {"market_cap": mc}
 
     if is_in_range(nickname, probe):
         return False, ""
 
     # v3.4.5 · 射程外但 LHB 显示该席位真实参与 → 不 skip · 强制评分
     # matched_youzi 是 list[str] of 游资昵称（来自 fetch_lhb.match_seats_in_lhb keys）
-    matched = features.get("matched_youzi") or []
+    matched = (features.get("matched_youzi") or []) if features.get("lhb_verified") is True else []
     if matched and nickname in matched:
         return False, ""  # LHB 反查覆盖 · 实际参与了 · 不能 skip
 
@@ -174,7 +176,7 @@ def evaluate(investor_id: str, features: dict) -> dict:
         if inv_group != locked:
             return _skip_result(
                 investor_id,
-                f"用户锁定 {SCHOOL_LABELS.get(locked, locked)} 派视角 · 非该派评委不参与",
+                f"用户锁定 {SCHOOL_LABELS.get(locked, locked)} 派视角 · 非该派评委不参与", "school_locked",
             )
 
     # ─── Layer 1: Reality Check ───
@@ -187,12 +189,20 @@ def evaluate(investor_id: str, features: dict) -> dict:
 
     # If this investor wouldn't look at this market at all → "不适合"
     if not rc["should_evaluate"]:
-        return _skip_result(investor_id, rc["skip_reason"] or "不在能力圈")
+        return _skip_result(investor_id, rc["skip_reason"] or "不在能力圈", "market_not_applicable")
+
+    gap = model_gap(investor_id)
+    if gap:
+        result = _skip_result(investor_id, gap["skip_reason"])
+        result.update(gap)
+        return result
 
     # v2.13.3 · F 组游资射程前置检查 · 大市值超射程直接 skip 不打分
+    if _INVESTOR_GROUP_MAP.get(investor_id) == "F" and not (features.get("market_cap") or features.get("market_cap_yi")):
+        return _skip_result(investor_id, "市值缺失，无法核验策略容量范围", "missing_data")
     out_of_range, range_reason = _is_youzi_out_of_range(investor_id, features)
     if out_of_range:
-        return _skip_result(investor_id, range_reason)
+        return _skip_result(investor_id, range_reason, "strategy_out_of_scope")
 
     rules: list[Rule] = INVESTOR_RULES.get(investor_id, [])
     if not rules:
@@ -271,6 +281,12 @@ def evaluate(investor_id: str, features: dict) -> dict:
     extremeness = abs(score - 50) * 0.6
     confidence = round(min(100, base_conf * 0.6 + 40 + extremeness * 0.4), 0)
 
+    # Missing rules reduce confidence; no-data is not a confident neutral vote.
+    coverage = (len(pass_list) + len(fail_list)) / max(len(rules) + bool(holding_match), 1)
+    confidence = round(confidence * coverage)
+    if not weight_total:
+        return _skip_result(investor_id, "没有可核验的有效评分规则数据", "missing_data")
+
     # Sort rules by weight desc for display
     pass_list.sort(key=lambda r: -r["weight"])
     fail_list.sort(key=lambda r: -r["weight"])
@@ -337,7 +353,7 @@ def _build_rationale(signal: str, pass_list: list, fail_list: list) -> str:
     return "\n".join(lines) if lines else "无有效规则命中"
 
 
-def _skip_result(investor_id: str, reason: str) -> dict:
+def _skip_result(investor_id: str, reason: str, category: str = "unspecified") -> dict:
     """This investor would not evaluate this stock (market/scope mismatch)."""
     profile = _get_profile(investor_id, group=_INVESTOR_GROUP_MAP.get(investor_id, ""))
     return {
@@ -354,6 +370,7 @@ def _skip_result(investor_id: str, reason: str) -> dict:
         "headline": f"不适合 — {reason}",
         "rationale": f"该投资者{reason}，不对此股票发表意见。",
         "skip_reason": reason,
+        "abstention_category": category,
         "time_horizon": profile["time_horizon"],
         "position_sizing": profile["position_sizing"],
         "what_would_change_my_mind": profile["what_would_change_my_mind"],

@@ -195,6 +195,8 @@ def collect_raw_data(ticker: str, max_workers: int = 6, resume: bool = True) -> 
     except Exception:
         pass
     raw = {"ticker": ticker, "market": _initial_market, "fetched_at": _dt.now().isoformat(timespec="seconds")}
+    from lib.analysis_profile import get_profile
+    raw["_profile_depth"] = get_profile().depth
     dims: dict = {}
     t0 = time.time()
 
@@ -243,6 +245,10 @@ def collect_raw_data(ticker: str, max_workers: int = 6, resume: bool = True) -> 
         if dim_key in REALTIME_DIMS:
             return False
         d = cached_dims.get(dim_key)
+        if dim_key == "15_events" and raw.get("market") == "H":
+            from lib.event_integrity import EVENT_IDENTITY_VERSION
+            if ((d or {}).get("data") or {}).get("_issuer_identity_version") != EVENT_IDENTITY_VERSION:
+                return False
         if not isinstance(d, dict):
             return False
         return bool(d.get("data")) and not d.get("_timeout") and not d.get("error")
@@ -773,6 +779,10 @@ def stage2(ticker: str) -> str:
     if not (raw and dims and panel):
         raise RuntimeError(f"Stage 2 缺少数据，请先跑 stage1('{ticker}')")
 
+    from lib.event_integrity import sanitize_hk_events
+    if sanitize_hk_events(raw):
+        raise RuntimeError("公告归属未核验，旧评分与投票不可复用；请重新运行 stage1 后再生成报告")
+
     # Agent analysis must match the current raw snapshot; stale role-play is never reused.
     from lib.agent_review import load_fresh_agent_analysis, requires_agent_review
     agent_analysis, freshness_reason = load_fresh_agent_analysis(
@@ -822,6 +832,9 @@ def stage2(ticker: str) -> str:
 
     print(f"\n⚖ Task 4 · 综合研判")
     syn = generate_synthesis(raw, dims, panel, agent_analysis=agent_analysis)
+    # assemble() reloads panel.json; persist merged votes and evidence before rendering.
+    panel["agent_reviewed"] = bool(syn.get("agent_reviewed"))
+    write_task_output(ti.full, "panel", panel)
 
     # v2.3 · 合并 _data_gaps.json 进 synthesis，让报告组装环节能渲染橙色徽章/banner。
     # agent 若在 agent_analysis.json 里显式 ack 了某个 gap，标 resolved=false + note；

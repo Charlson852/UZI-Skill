@@ -504,7 +504,7 @@ def check_consensus_formula_sanity(ctx: dict) -> list[Issue]:
     panel = ctx.get("panel") or {}
     cf = panel.get("consensus_formula") or {}
     cons = panel.get("panel_consensus", -1)
-    if cons < 0: return issues
+    if cons is None or cons < 0: return issues
     # 支持 v2.9.1 / v2.11 / v2.15.5 · 更早版本才警告
     version = cf.get("version", "")
     is_current = any(tag in version for tag in ("v2.15.5", "v2.11", "v2.9.1", "bullish + 0.5", "polarize"))
@@ -534,6 +534,13 @@ def check_panel_hollow_verdicts(ctx: dict) -> list[Issue]:
     panel = ctx.get("panel") or {}
     if panel.get("consensus_valid", True):
         return []
+    if panel.get("long_active") == 0:
+        return [Issue(
+            severity="warning", category="panel", dim="panel",
+            issue="没有有效评委投票，共识不可用",
+            evidence=panel.get("consensus_warning") or "全员弃权",
+            suggested_fix="展示弃权原因与证据缺口，不将缺失共识当成看空或买入信号。",
+        )]
     return [Issue(
         severity="critical",
         category="panel",

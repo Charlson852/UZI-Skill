@@ -31,7 +31,7 @@ def test_youzi_skipped_when_no_lhb_match_and_oversize():
 def test_youzi_active_when_lhb_shows_participation():
     """v3.4.5 · 大市值 + LHB 显示该游资真实参与 → 不 skip · 强制评分."""
     from lib.investor_evaluator import _is_youzi_out_of_range
-    features = {"market_cap_yi": 2000, "matched_youzi": ["赵老哥", "孙哥"]}
+    features = {"market_cap_yi": 2000, "matched_youzi": ["赵老哥", "孙哥"], "lhb_verified": True}
     out, reason = _is_youzi_out_of_range("zhao_lg", features)
     assert out is False, "LHB 反查应覆盖射程限制 · 让评委参与评分"
 

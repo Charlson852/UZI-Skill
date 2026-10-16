@@ -493,7 +493,8 @@ def _render_style_chip(syn: dict) -> str:
 
     compare = (
         f"fund {fund_old:.1f}→<strong>{fund_new:.1f}</strong>{_delta(fund_old, fund_new)} · "
-        f"panel {cons_old:.1f}→<strong>{cons_new:.1f}</strong>{_delta(cons_old, cons_new)}"
+        + (f"panel {cons_old:.1f}→<strong>{cons_new:.1f}</strong>{_delta(cons_old, cons_new)}"
+           if cons_new is not None and syn.get("consensus_valid", True) else "panel —（共识不可用）")
     )
 
     return f'''<div class="style-chip-wrap">

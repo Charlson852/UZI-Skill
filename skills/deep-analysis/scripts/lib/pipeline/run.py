@@ -111,6 +111,8 @@ def _load_cache(ticker: str) -> dict:
 def _write_cache(ticker: str, raw: dict) -> None:
     """写 raw_data.json · 让 legacy stage1 的 resume 能复用."""
     from lib.market_router import parse_ticker
+    from lib.analysis_profile import get_profile
+    raw = {**raw, "_profile_depth": get_profile().depth}
     ti = parse_ticker(ticker)
     import run_real_test as rrt
     cache_dir = Path(rrt.__file__).parent / ".cache" / ti.full

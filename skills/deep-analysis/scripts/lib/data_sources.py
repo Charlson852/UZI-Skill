@@ -1267,7 +1267,22 @@ def fetch_lhb_recent(ti: TickerInfo, days: int = 30) -> list[dict]:
     return cached(ti.full, key, lambda: _fetch_lhb_impl(ti, days), ttl=TTL_DAILY)
 
 
+def fetch_lhb_evidence(ti: TickerInfo, days: int = 30) -> dict:
+    """Versioned evidence: failed queries are never a verified zero."""
+    if ti.market != "A":
+        return {"status": "not_applicable", "verified": False, "records": [], "board_dates": [], "errors": []}
+    if ak is None:
+        return {"status": "error", "verified": False, "records": [], "board_dates": [], "errors": ["akshare unavailable"]}
+    return cached(ti.full, f"lhb_evidence_v2__{ti.code}__{days}",
+                  lambda: _fetch_lhb_evidence_impl(ti, days), ttl=TTL_DAILY)
+
+
 def _fetch_lhb_impl(ti: TickerInfo, days: int) -> list[dict]:
+    # Legacy list API; consumers needing absence evidence must use fetch_lhb_evidence.
+    return _fetch_lhb_evidence_impl(ti, days)["records"]
+
+
+def _fetch_lhb_evidence_impl(ti: TickerInfo, days: int) -> dict:
     """Fetch seat-level LHB records for the past N days.
 
     akshare 1.18+ broke the ``date="近一月"/"近三月"`` shortcuts on
@@ -1280,12 +1295,18 @@ def _fetch_lhb_impl(ti: TickerInfo, days: int) -> list[dict]:
     downstream consumers (``fetch_lhb.py::split_inst_vs_youzi`` and
     ``lib/seat_db.py::match_seats_in_lhb``) keep working unchanged.
     """
+    result = {"records": [], "status": "error", "verified": False,
+              "board_dates": [], "failed_dates": [], "errors": [],
+              "source": "akshare:stock_lhb_stock_detail_date_em + stock_lhb_stock_detail_em",
+              "fetched_at": datetime.now().isoformat()}
     try:
         dates_df = ak.stock_lhb_stock_detail_date_em(symbol=ti.code)
-    except Exception:
-        return []
-    if dates_df is None or dates_df.empty or "交易日" not in dates_df.columns:
-        return []
+    except Exception as exc:
+        result["errors"].append(f"dates: {type(exc).__name__}: {exc}")
+        return result
+    if dates_df is None or "交易日" not in dates_df.columns:
+        result["errors"].append("dates response missing 交易日 schema")
+        return result
 
     cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
     dates: list[str] = []
@@ -1294,13 +1315,19 @@ def _fetch_lhb_impl(ti: TickerInfo, days: int) -> list[dict]:
         if d10 >= cutoff:
             dates.append(d10.replace("-", ""))
 
+    dates = sorted(set(dates))
+    result["board_dates"] = dates
     all_records: list[dict] = []
     for dt in dates:
         try:
             df = ak.stock_lhb_stock_detail_em(symbol=ti.code, date=dt)
-        except Exception:
+        except Exception as exc:
+            result["failed_dates"].append(dt)
+            result["errors"].append(f"{dt}: {type(exc).__name__}: {exc}")
             continue
         if df is None or df.empty:
+            result["failed_dates"].append(dt)
+            result["errors"].append(f"{dt}: empty seat response for known board date")
             continue
         # Normalize seat column name for downstream consumers
         for legacy in ("交易营业部名称", "交易营业部"):
@@ -1309,7 +1336,10 @@ def _fetch_lhb_impl(ti: TickerInfo, days: int) -> list[dict]:
                 break
         df["上榜日"] = dt
         all_records.extend(df.to_dict("records"))
-    return all_records
+    result["records"] = all_records
+    result["verified"] = not result["failed_dates"]
+    result["status"] = ("partial" if all_records else "error") if result["failed_dates"] else ("ok" if dates else "no_records")
+    return result
 
 
 # ─────────────────────────────────────────────────────────────

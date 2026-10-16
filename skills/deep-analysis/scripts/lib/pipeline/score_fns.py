@@ -20,6 +20,9 @@ rrt.py 仍 re-export 这些函数 (from lib.pipeline.score_fns import *)· 所�
 """
 from __future__ import annotations
 
+from lib.panel_status import summarize_abstentions
+from lib.panel_evidence import merge_investor_overrides, normalize_abstention
+
 import json
 import os
 import sys
@@ -49,6 +52,8 @@ def _f(v, default=0.0):
 
 
 def score_dimensions(raw: dict) -> dict:
+    from lib.event_integrity import sanitize_hk_events
+    sanitize_hk_events(raw)
     dims = raw.get("dimensions", {})
     out = {}
 
@@ -169,20 +174,19 @@ def score_dimensions(raw: dict) -> dict:
 
     # 10 · 估值
     val = _get("10_valuation")
-    pe_q_str = str(val.get("pe_quantile", ""))
-    import re
-    m = re.search(r'(\d+)', pe_q_str)
-    pe_q = int(m.group(1)) if m else 50
+    from lib.valuation_fields import parse_percentile
+    pe_q = parse_percentile(val.get("pe_quantile"))
     score_10 = 5
-    if pe_q < 30: score_10 = 9
+    if pe_q is None: score_10 = 5
+    elif pe_q < 30: score_10 = 9
     elif pe_q < 50: score_10 = 7
     elif pe_q < 70: score_10 = 5
     elif pe_q < 85: score_10 = 3
     else: score_10 = 2
     out["10_valuation"] = {"score": score_10, "weight": 5,
-                            "label": f"PE {val.get('pe', '—')} · 5 年 {pe_q} 分位 · 行业均值 {val.get('industry_pe', '—')}",
-                            "reasons_pass": ["PE 在 5 年中位数以下"] if pe_q < 50 else [],
-                            "reasons_fail": ["PE 已在 5 年高位区"] if pe_q >= 75 else []}
+                            "label": f"PE {val.get('pe', '—')} · 历史分位 {pe_q if pe_q is not None else '未核验'} · 行业均值 {val.get('industry_pe', '—')}",
+                            "reasons_pass": ["PE 在 5 年中位数以下"] if pe_q is not None and pe_q < 50 else [],
+                            "reasons_fail": ["PE 已在 5 年高位区"] if pe_q is not None and pe_q >= 75 else []}
 
     # 11 · 治理
     gov = _get("11_governance")
@@ -231,16 +235,20 @@ def score_dimensions(raw: dict) -> dict:
     out["15_events"] = {"score": score_15, "weight": 4,
                         "label": f"近期新闻 {len(news)} 条 · 公告 {len(notices)} 份"}
 
-    # 16 · 龙虎榜
+    # 16 · 龙虎榜：unknown/not-applicable cannot become a zero-count signal.
     lhb = _get("16_lhb")
-    lhb_count = lhb.get("lhb_count_30d", 0)
+    lhb_count = lhb.get("lhb_count_30d")
     matched = lhb.get("matched_youzi") or []
-    score_16 = 5 + min(3, lhb_count // 2)
-    if matched: score_16 += 1
-    score_16 = min(10, score_16)
-    out["16_lhb"] = {"score": score_16, "weight": 4,
-                     "label": f"近 30 天上榜 {lhb_count} 次 · 识别游资 {len(matched)} 位",
-                     "reasons_pass": [f"{'/'.join(matched[:3])} 席位出现"] if matched else []}
+    if lhb.get("verified") is not True or lhb_count is None:
+        out["16_lhb"] = {"score": 5, "weight": 0,
+                         "label": "市场不适用" if lhb.get("status") == "not_applicable" else "龙虎榜证据未核验",
+                         "reasons_pass": [], "data_status": lhb.get("status", "unverified")}
+    else:
+        score_16 = min(10, 5 + min(3, lhb_count // 2) + bool(matched))
+        out["16_lhb"] = {"score": score_16, "weight": 4,
+                         "label": f"近 30 天上榜 {lhb_count} 次 · 识别游资 {len(matched)} 位",
+                         "reasons_pass": [f"{'/'.join(matched[:3])} 席位出现"] if matched else [],
+                         "data_status": lhb.get("status")}
 
     # 17 · 舆情
     hot = _get("17_sentiment")
@@ -330,6 +338,9 @@ def generate_panel(dims_scored: dict, raw: dict) -> dict:
     """Rule-engine-based panel — each investor's verdict cites specific
     criteria from investor_criteria.py that were hit or missed.
     """
+    from lib.event_integrity import sanitize_hk_events
+    if sanitize_hk_events(raw):
+        dims_scored.update(score_dimensions(raw))
     # Build the flat feature dict once for all 51 investors
     features = extract_features(raw, raw.get("dimensions", {}))
 
@@ -338,8 +349,6 @@ def generate_panel(dims_scored: dict, raw: dict) -> dict:
     fin_ctx = (raw.get("dimensions", {}).get("1_financials") or {}).get("data") or {}
 
     investors_out = []
-    vote_dist = {"strongly_buy": 0, "buy": 0, "watch": 0, "wait": 0, "avoid": 0, "n_a": 0, "skip": 0}
-    sig_dist = {"bullish": 0, "neutral": 0, "bearish": 0, "skip": 0}
 
     def _score_to_verdict(score: float, signal: str) -> str:
         if signal == "bullish" and score >= 80:
@@ -394,12 +403,6 @@ def generate_panel(dims_scored: dict, raw: dict) -> dict:
             comment = f"{persona_line}\n{headline}"
             reasoning = verdict_obj["rationale"]
 
-        v_key = {"强烈买入": "strongly_buy", "买入": "buy", "关注": "watch",
-                 "观望": "wait", "回避": "avoid", "不适合": "skip"}.get(verdict, "n_a")
-        if mandate != "short":
-            vote_dist[v_key] = vote_dist.get(v_key, 0) + 1
-            sig_dist[sig] = sig_dist.get(sig, 0) + 1
-
         investors_out.append({
             "investor_id": inv_id,
             "name": inv["name"],
@@ -413,6 +416,9 @@ def generate_panel(dims_scored: dict, raw: dict) -> dict:
             "reasoning": reasoning,
             "comment": comment,
             "headline": headline,
+            "abstention_category": verdict_obj.get("abstention_category"),
+            "skip_reason": verdict_obj.get("skip_reason"),
+            "required_evidence": verdict_obj.get("required_evidence", []),
             "pass": [{"name": r["name"], "msg": r["msg"], "weight": r["weight"]}
                      for r in verdict_obj["pass_rules"][:4]],
             "fail": [{"name": r["name"], "msg": r["msg"], "weight": r["weight"]}
@@ -426,6 +432,26 @@ def generate_panel(dims_scored: dict, raw: dict) -> dict:
             "position_sizing": verdict_obj.get("position_sizing", "—"),
             "what_would_change_my_mind": verdict_obj.get("what_would_change_my_mind", "—"),
         })
+
+    for investor in investors_out:
+        normalize_abstention(investor)
+    return _summarize_panel(investors_out, raw["ticker"])
+
+
+def _summarize_panel(investors_out, ticker):
+    """Recompute every derived panel statistic after scoring or review overrides."""
+    sig_dist = {key: 0 for key in ("bullish", "neutral", "bearish", "skip")}
+    vote_dist = {key: 0 for key in ("strongly_buy", "buy", "watch", "wait", "avoid", "n_a", "skip")}
+    for investor in investors_out:
+        if investor.get("mandate") == "short":
+            continue
+        signal = investor.get("signal", "skip")
+        sig_dist[signal] += 1
+        key = "skip" if signal == "skip" else {
+            "强烈买入": "strongly_buy", "买入": "buy", "关注": "watch",
+            "观望": "wait", "回避": "avoid",
+        }.get(investor.get("verdict"), "n_a")
+        vote_dist[key] += 1
 
     # v2.15.5 · 混合 consensus 公式（连续分 + 离散票）
     # 动机：v2.11 单一公式 `(bullish + 0.6*neutral)/active*100` 只看 signal 计数 ·
@@ -570,22 +596,24 @@ def generate_panel(dims_scored: dict, raw: dict) -> dict:
         and not investor.get("fail")
     ]
     hollow_pct = round(len(hollow_ids) / len(active_long) * 100, 0) if active_long else 0
-    consensus_valid = hollow_pct < 20
+    consensus_valid = bool(active_long) and hollow_pct < 20
 
     return {
-        "ticker": raw["ticker"],
-        "panel_consensus": round(consensus, 1),
+        "ticker": ticker,
+        "panel_consensus": round(consensus, 1) if consensus_valid else None,
         "consensus_valid": consensus_valid,
         "hollow_verdicts": len(hollow_ids),
         "hollow_pct": hollow_pct,
         "hollow_ids": hollow_ids,
         "consensus_warning": (
             None if consensus_valid else
+            "没有有效多头评委投票；共识不可用，弃权不等于看空。" if not active_long else
             f"共识分不可采信：{len(hollow_ids)}/{len(active_long)} 位多头评委（{hollow_pct:.0f}%）"
             "没有任何有效规则证据。"
         ),
         "vote_distribution": vote_dist,
         "signal_distribution": sig_dist,
+        "abstention_distribution": summarize_abstentions(investors_out),
         "investors": investors_out,
         # v2.15.4 · 按流派分数 · 7 个 school 各自 consensus/avg_score/verdict
         "school_scores": school_scores,
@@ -601,7 +629,7 @@ def generate_panel(dims_scored: dict, raw: dict) -> dict:
             "score_mean": round(score_mean, 2),
             "vote_weighted": round(vote_weighted, 2),
             "consensus_raw": round(consensus_raw, 2),     # 极化前
-            "consensus_final": round(consensus, 2),        # 极化后（= panel_consensus）
+            "consensus_final": round(consensus, 2) if consensus_valid else None,
             "bullish": bullish,
             "neutral_weighted": round(neutral * NEUTRAL_WEIGHT, 2),
             "bearish": sig_dist.get("bearish", 0),
@@ -986,23 +1014,10 @@ def generate_synthesis(raw: dict, dims_scored: dict, panel: dict, agent_analysis
     from compute_friendly import compute_scenarios, compute_exit_triggers
     ag = agent_analysis or {}
 
-    # v3.9.4 · per_investor_override 合并 —— 让 agent 的 role-play 成果真正生效
-    # （此前 agent 写进 agent_analysis.json 的 per_investor_override 是死字段，
-    #   规则引擎生成的评委判决永远覆盖不过去）
-    _pio = ag.get("per_investor_override") or {}
-    if isinstance(_pio, dict) and _pio:
-        _inv_list = panel.get("investors") or []
-        _by_id = {i.get("investor_id"): i for i in _inv_list}
-        for _id, _ov in _pio.items():
-            _inv = _by_id.get(_id)
-            if not isinstance(_inv, dict):
-                continue
-            for _fld in ("signal", "score", "headline", "reasoning", "comment", "verdict"):
-                if _fld in _ov and _ov[_fld] is not None:
-                    _inv[_fld] = _ov[_fld]
-            # comment 未显式给出时用 headline（保持展示层有内容）
-            if not _inv.get("comment") and _inv.get("headline"):
-                _inv["comment"] = _inv["headline"]
+    investors = panel.get("investors") or []
+    merge_investor_overrides(investors, ag.get("per_investor_override"))
+    if investors:
+        panel.update(_summarize_panel(investors, raw.get("ticker", panel.get("ticker"))))
 
     basic = (raw.get("dimensions", {}).get("0_basic") or {}).get("data") or {}
     name = basic.get("name") or raw.get("ticker")
@@ -1015,7 +1030,8 @@ def generate_synthesis(raw: dict, dims_scored: dict, panel: dict, agent_analysis
     style_label = "balanced"
     style_diag = {}
     fund_score = dims_scored.get("fundamental_score", 60)
-    consensus = panel.get("panel_consensus", 50)
+    consensus_valid = panel.get("consensus_valid", True) and panel.get("panel_consensus") is not None
+    consensus = panel.get("panel_consensus") if consensus_valid else 0.0
     fund_score_old = fund_score
     consensus_old = consensus
     try:
@@ -1051,13 +1067,14 @@ def generate_synthesis(raw: dict, dims_scored: dict, panel: dict, agent_analysis
         style_label = detect_style(feat_for_style, raw)
         adj = apply_style_weights(panel.get("investors", []), dims_scored, style_label)
         fund_score = adj["fundamental_score"]
-        consensus = adj["panel_consensus"]
+        if consensus_valid:
+            consensus = adj["panel_consensus"]
         style_diag = adj["diagnostics"]
         print(f"\n  🎯 v2.7 风格识别: {style_label} ({STYLE_LABELS.get(style_label,'?')}) — fund {fund_score_old:.1f}→{fund_score:.1f} · consensus {consensus_old:.1f}→{consensus:.1f}")
     except Exception as _se:
         print(f"  ⚠️ v2.7 风格加权失败（沿用原始公式）: {type(_se).__name__}: {str(_se)[:120]}")
 
-    overall = fund_score * 0.6 + consensus * 0.4
+    overall = fund_score * 0.6 + consensus * 0.4 if consensus_valid else fund_score
 
     # v2.11 · verdict 阈值重校准 · 论坛+微信反馈用户心理及格线是 65 分
     # 调整：85/70/55/40 → 80/65/50/35，让白马/真强股进"可以蹲一蹲"档
@@ -1096,7 +1113,9 @@ def generate_synthesis(raw: dict, dims_scored: dict, panel: dict, agent_analysis
             verdict_label += f" · {len(bearish_schools)} 派看空"
 
     # v3.4.1 · 同时记 verdict_detail · 含 fund + consensus 精确分（让相近股票能区分）
-    verdict_detail = f"基本面 {fund_score:.1f} · 共识 {consensus:.1f}"
+    verdict_detail = f"基本面 {fund_score:.1f} · 共识 {consensus:.1f}" if consensus_valid else f"基本面 {fund_score:.1f} · 共识不可用（未计入总分）"
+    if not consensus_valid:
+        verdict_label = "证据不足 · 暂不形成方向性结论"
 
     # Pick bull and bear for great divide
     # CRITICAL: must pick from ACTUALLY bullish/bearish investors, never misattribute
@@ -1113,11 +1132,11 @@ def generate_synthesis(raw: dict, dims_scored: dict, panel: dict, agent_analysis
         and i.get("score", 0) > 0  # 0 分通常是 fail_msg 幻觉，剔除
     ]
     if not eligible:
-        eligible = [i for i in investors if i.get("signal") != "skip"] or investors
+        eligible = [i for i in investors if i.get("signal") != "skip"]
 
     inv_by_score = sorted(eligible, key=lambda x: -x.get("score", 0))
-    bull = inv_by_score[0] if inv_by_score else (investors[0] if investors else {})
-    bear = inv_by_score[-1] if inv_by_score else (investors[-1] if investors else {})
+    bull = inv_by_score[0] if inv_by_score else {}
+    bear = inv_by_score[-1] if inv_by_score else {}
 
     # Safety: bull and bear must be different investors
     if bull.get("investor_id") == bear.get("investor_id") and len(inv_by_score) > 1:
@@ -1167,6 +1186,9 @@ def generate_synthesis(raw: dict, dims_scored: dict, panel: dict, agent_analysis
             "bear_say": agent_bear_rounds[2] if len(agent_bear_rounds) > 2 else f"综合看，{bear.get('score', 0)} 分，风险大于收益。",
         },
     ]
+
+    if not eligible:
+        rounds = []  # No directional debate when every judge abstains.
 
     kline = (raw.get("dimensions", {}).get("2_kline") or {}).get("data") or {}
     val = (raw.get("dimensions", {}).get("10_valuation") or {}).get("data") or {}
@@ -1315,7 +1337,8 @@ def generate_synthesis(raw: dict, dims_scored: dict, panel: dict, agent_analysis
         "verdict_label": verdict_label,
         "verdict_detail": verdict_detail,  # v3.4.1 · 基本面/共识精确分 · 区分相近 verdict 段的票
         "fundamental_score": round(fund_score, 1),
-        "panel_consensus": round(consensus, 1),
+        "panel_consensus": round(consensus, 1) if consensus_valid else None,
+        "consensus_valid": consensus_valid,
         # v3.5.0 · 用户锁定单一流派视角时 · 告诉报告层渲染 banner
         "school_lock": school_lock,
         # v2.15.4 · 按流派分数也带到 synthesis · 让报告层无须回拉 panel.json
@@ -1351,27 +1374,28 @@ def generate_synthesis(raw: dict, dims_scored: dict, panel: dict, agent_analysis
                 "buy_zones.*.rationale", "risks[*]"],
         },
         "debate": {
-            "bull": {"investor_id": bull["investor_id"], "name": bull["name"], "group": bull["group"]},
-            "bear": {"investor_id": bear["investor_id"], "name": bear["name"], "group": bear["group"]},
+            "bull": {"investor_id": bull.get("investor_id"), "name": bull.get("name"), "group": bull.get("group")} if bull else {},
+            "bear": {"investor_id": bear.get("investor_id"), "name": bear.get("name"), "group": bear.get("group")} if bear else {},
             "rounds": rounds,
             "punchline": punchline,
         },
         "great_divide": {
-            "bull_avatar": bull["investor_id"],
-            "bear_avatar": bear["investor_id"],
-            "bull_score": bull["score"],
-            "bear_score": bear["score"],
-            "bull_signal": bull["signal"],
-            "bear_signal": bear["signal"],
+            "bull_avatar": bull.get("investor_id"),
+            "bear_avatar": bear.get("investor_id"),
+            "bull_score": bull.get("score"),
+            "bear_score": bear.get("score"),
+            "bull_signal": bull.get("signal"),
+            "bear_signal": bear.get("signal"),
             "punchline": punchline,
         },
         "risks": risks,
-        "buy_zones": narrative_override.get("buy_zones") or {
+        "buy_zones": ({key: {"price": "—", "rationale": "评委证据不足，未形成买入区间"}
+                       for key in ("value", "growth", "technical", "youzi")} if not consensus_valid else narrative_override.get("buy_zones") or {
             "value": {"price": round(price * 0.85, 2) if price else "—", "rationale": "历史 PE 25 分位"},
             "growth": {"price": round(price * 0.92, 2) if price else "—", "rationale": "PEG 合理区"},
             "technical": {"price": round(price * 0.95, 2) if price else "—", "rationale": "MA60 支撑位"},
             "youzi": {"price": price or "—", "rationale": "当前情绪未破"},
-        },
+        }),
         "friendly": {
             "scenarios": scenarios,
             "exit_triggers": exit_triggers,

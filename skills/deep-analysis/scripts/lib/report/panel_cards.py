@@ -19,6 +19,7 @@ assemble_report.py 做 re-export · 所有历史调用不变.
 from __future__ import annotations
 
 from lib.report.security import escape_payload, safe_asset_id
+from lib.panel_status import status_label
 
 
 def _safe(v, default="—"):
@@ -37,7 +38,7 @@ def render_jury_seat(inv: dict) -> str:
     inv = escape_payload(inv)
     sig = inv.get("signal", "neutral")
     name = (inv.get("name") or "")[:4]
-    score = inv.get("score", 0)
+    score = "—" if sig == "skip" else inv.get("score", 0)
     inv_id = safe_asset_id(inv.get("investor_id"))
     return f'''<div class="seat {sig}" data-group="{inv.get("group", "")}" data-target="msg-{inv_id}" title="{inv.get("name", "")} · {inv.get("verdict", "")} · 点击查看完整结论">
   <img src="avatars/{inv_id}.svg" class="seat-avatar" alt="">
@@ -65,11 +66,13 @@ def render_chat_message(inv: dict) -> str:
     sig = inv.get("signal", "neutral")
     group = inv.get("group", "")
     group_label = GROUP_LABELS.get(group, group)
-    score = inv.get("score", 0)
+    score = "—" if sig == "skip" else inv.get("score", 0)
     confidence = inv.get("confidence", 0)
     reasoning = _safe(inv.get("reasoning") or inv.get("comment"), "—")
     comment = _safe(inv.get("comment"), "")
-    verdict = _safe(inv.get("verdict"), "—")
+    verdict = status_label(inv) if sig == "skip" else _safe(inv.get("verdict"), "—")
+    if sig == "skip" and inv.get("skip_reason"):
+        reasoning = _safe(inv["skip_reason"], "—")
     pass_items = inv.get("pass") or []
     fail_items = inv.get("fail") or []
     ideal_price = inv.get("ideal_price")
@@ -79,6 +82,9 @@ def render_chat_message(inv: dict) -> str:
     bubble_main = f'<div class="msg-reasoning">{reasoning}</div>'
     if comment and comment != reasoning:
         bubble_main += f'<div class="msg-comment">💬 "{comment}"</div>'
+
+    if sig == "skip":
+        bubble_main += f'<div class="msg-abstention">{status_label(inv)} · {inv.get("skip_reason") or inv.get("headline") or ""}</div>'
 
     # Full conclusion (collapsed by default, click to expand)
     pass_html = f'<div class="conc-block"><div class="conc-label">✅ 命中</div><ul>{_li(pass_items)}</ul></div>' if pass_items else ""

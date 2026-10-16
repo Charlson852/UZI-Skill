@@ -131,6 +131,7 @@ def market_status(market: str = "A", now: datetime | None = None) -> dict:
 
 def write_task_output(ticker: str, task_name: str, data: dict) -> Path:
     """Write a task's final JSON to .cache/{ticker}/{task_name}.json"""
+    # Collection owns profile metadata; re-saving an old cache must not invent it.
     path = CACHE_ROOT / ticker / f"{task_name}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2, default=str), encoding="utf-8")

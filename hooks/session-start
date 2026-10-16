@@ -66,5 +66,9 @@ CONTEXT="$(cat <<'SKILLS_CONTEXT'
 SKILLS_CONTEXT
 )"
 
-# Output as JSON additionalContext for Claude Code hooks
-printf '{"additionalContext": "%s"}\n' "$(echo "$CONTEXT" | sed 's/"/\\"/g' | sed ':a;N;$!ba;s/\n/\\n/g')"
+# Encode control characters portably on both BSD and GNU systems.
+if command -v python3 >/dev/null 2>&1; then
+  printf '%s' "$CONTEXT" | python3 -c 'import json, sys; print(json.dumps({"additionalContext": sys.stdin.read()}, ensure_ascii=False))'
+else
+  printf '%s\n' "$CONTEXT"
+fi

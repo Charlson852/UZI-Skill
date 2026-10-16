@@ -69,9 +69,9 @@ def test_cninfo_direct_api_parses_valid_response():
         mock_resp.status_code = 200
         mock_resp.json.return_value = {
             "announcements": [
-                {"announcementTitle": "年报", "announcementTime": 1717545600000,
+                {"secCode": "000958", "announcementTitle": "年报", "announcementTime": 1717545600000,
                  "adjunctUrl": "/finalpage/2026-01-01/x.pdf"},
-                {"announcementTitle": "公告 2", "announcementTime": 1717459200000,
+                {"secCode": "000958", "announcementTitle": "公告 2", "announcementTime": 1717459200000,
                  "adjunctUrl": "/finalpage/2026-01-02/y.pdf"},
             ]
         }

@@ -48,6 +48,8 @@ def score_from_cache(ticker: str) -> dict:
         )
 
     raw = json.loads(raw_path.read_text(encoding="utf-8"))
+    from lib.event_integrity import sanitize_hk_events
+    sanitize_hk_events(raw)
 
     # v2.6.1 · MX API 兜底补齐定性维度（原地改 raw · 不 raise）
     try:
@@ -61,6 +63,8 @@ def score_from_cache(ticker: str) -> dict:
         autofill_via_playwright(raw, ti.full)
     except Exception as e:
         print(f"   ⚠️ Playwright 兜底跳过: {type(e).__name__}: {str(e)[:80]}")
+
+    sanitize_hk_events(raw)
 
     # v3.9.4 · 机构建模 dim 20/21/22 —— 与 legacy stage1 保持一致
     # （此前 pipeline 从未计算这三个维度，导致默认路径报告缺整个机构建模章节）

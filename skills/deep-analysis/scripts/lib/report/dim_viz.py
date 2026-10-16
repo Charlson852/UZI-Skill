@@ -615,6 +615,9 @@ def _viz_events(raw: dict) -> str:
 
 
 def _viz_lhb(raw: dict) -> str:
+    if raw.get("verified") is not True:
+        label = "市场不适用" if raw.get("status") == "not_applicable" else "龙虎榜证据未核验（不等于0次上榜）"
+        return f'<div class="data-gap">{label}</div>'
     matched = raw.get("youzi_matched", "")
     if isinstance(matched, str):
         matched_list = [m.strip() for m in matched.split("/") if m.strip()]
@@ -645,7 +648,7 @@ def _viz_lhb(raw: dict) -> str:
     youzi_net = inst_vs.get("youzi_net", 0) if isinstance(inst_vs, dict) else "—"
     inst_net = f"{inst_net/1e8:+.1f}亿" if isinstance(inst_net, (int, float)) and inst_net != 0 else "—"
     youzi_net = f"{youzi_net/1e8:+.1f}亿" if isinstance(youzi_net, (int, float)) and youzi_net != 0 else "—"
-    lhb_30d = raw.get("lhb_count_30d") or "—"
+    lhb_30d = raw.get("lhb_count_30d") if raw.get("lhb_count_30d") is not None else "—"
     # balance bar
     import re
     def _parse(v):
@@ -668,7 +671,7 @@ def _viz_lhb(raw: dict) -> str:
   <div style="text-align:center;font-family:Fira Code;font-size:10px;color:#64748b;margin-top:6px">近 30 天上榜 <strong style="color:#0f172a">{lhb_30d}</strong></div>
 </div>'''
     # If own LHB is empty, show sector LHB leaders
-    sector_lhb = raw.get("sector_lhb_top50") or []
+    sector_lhb = (raw.get("sector_lhb_top50") or []) if raw.get("sector_lhb_scope") != "market_wide_unfiltered" else []
     sector_html = ""
     if (not matched_list) and isinstance(sector_lhb, list) and sector_lhb:
         rows = ""

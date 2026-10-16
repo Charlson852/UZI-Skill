@@ -185,44 +185,86 @@ def fetch_hk_valuation_ranks(code5: str) -> dict:
     return out
 
 
-def fetch_hk_announcements(code5: str, limit: int = 30) -> list[dict]:
-    """Scrape HKEXNews title search page for company announcements.
+def _resolve_hkex_stock_id(code5: str) -> str | None:
+    """Resolve exact security code using HKEX's public security directory.
 
-    URL: https://www1.hkexnews.hk/search/titlesearch.xhtml?lang=zh&stockId={int(code5)}
-    Returns list of {date, title, url} sorted by date desc.
+    The `i` field is the title-search stockId; it is NOT the stock code.
+    Never guess an ID when the directory cannot establish identity.
     """
+    for listing in ("activestock", "inactivestock"):
+        r = requests.get(
+            f"https://www1.hkexnews.hk/ncms/script/eds/{listing}_sehk_c.json",
+            timeout=15, headers={"User-Agent": _UA},
+        )
+        r.raise_for_status()
+        matches = {str(row["i"]) for row in r.json()
+                   if str(row.get("c", "")).zfill(5) == code5 and row.get("i") is not None}
+        if len(matches) == 1:
+            return matches.pop()
+        if matches:
+            return None
+    return None
+
+
+def _parse_hkex_announcements(html: str, code5: str, limit: int = 30) -> list[dict]:
+    """Accept only announcement rows with an explicit matching security code."""
+    from bs4 import BeautifulSoup
+    from datetime import datetime
+    from urllib.parse import urljoin, urlparse
+
+    soup = BeautifulSoup(html, "html.parser")
+    items, seen = [], set()
+    for row in soup.select("tr"):
+        code_cell = row.select_one("td.stock-short-code")
+        name_cell = row.select_one("td.stock-short-name")
+        date_cell = row.select_one("td.release-time")
+        if code_cell is None or name_cell is None or date_cell is None:
+            continue
+        for cell in (code_cell, name_cell, date_cell):
+            for label in cell.select(".mobile-list-heading"):
+                label.decompose()
+        codes = re.findall(r"(?<!\d)\d{5}(?!\d)", code_cell.get_text(" ", strip=True))
+        if code5 not in codes:
+            continue
+        try:
+            date = datetime.strptime(date_cell.get_text(" ", strip=True), "%d/%m/%Y %H:%M")
+        except ValueError:
+            continue
+        for link in row.select(".doc-link a[href]"):
+            url = urljoin("https://www1.hkexnews.hk", link["href"])
+            parsed = urlparse(url)
+            if (parsed.hostname != "www1.hkexnews.hk" or
+                    not re.fullmatch(r"/listedco/listconews/sehk/\d{4}/\d{4}/[^/]+\.(?:pdf|htm|html)", parsed.path, re.I)):
+                continue
+            title = link.get_text(" ", strip=True)
+            if not title or url in seen:
+                continue
+            seen.add(url)
+            items.append({"date": date.isoformat(timespec="minutes"), "title": title,
+                          "url": url, "source": "hkexnews", "stock_code": code5,
+                          "issuer_name": name_cell.get_text(" ", strip=True),
+                          "issuer_verified": True})
+    return sorted(items, key=lambda item: item["date"], reverse=True)[:max(0, limit)]
+
+
+def fetch_hk_announcements(code5: str, limit: int = 30) -> list[dict]:
+    """Query by resolved HKEX ID and verify each returned row's security code."""
     if requests is None:
         return []
-    int_code = str(int(code5))  # "00700" -> "700"
-    url = (
-        f"https://www1.hkexnews.hk/search/titlesearch.xhtml"
-        f"?lang=zh&category=0&t1code=&market=SEHK&stockId={int_code}"
-    )
+    if not re.fullmatch(r"\d{1,5}", str(code5)):
+        return []
+    code5 = str(code5).zfill(5)
     try:
-        r = requests.get(url, timeout=15, headers={"User-Agent": _UA})
-        if r.status_code != 200:
+        stock_id = _resolve_hkex_stock_id(code5)
+        if stock_id is None:
             return []
-        html = r.text
-        # HKEXNews titles are in table rows: <tr><td>release date</td>...<td><a href="...">title</a></td>
-        # Pattern is forgiving — match date + href + title text from the row block.
-        # Actually the search page returns FORM scaffolding only; results come via POST.
-        # Fallback: scan any visible <a class="news"> or anchor with title-like text.
-        rows = re.findall(
-            r'<a[^>]+href="([^"]+(?:listedco|listconews|filing)[^"]+)"[^>]*>([^<]{6,200})</a>',
-            html, re.I
+        r = requests.get(
+            "https://www1.hkexnews.hk/search/titlesearch.xhtml",
+            params={"lang": "zh", "category": "0", "market": "SEHK", "stockId": stock_id},
+            timeout=15, headers={"User-Agent": _UA},
         )
-        items: list[dict] = []
-        seen: set[str] = set()
-        for href, title in rows:
-            title = title.strip()
-            if not title or title in seen:
-                continue
-            seen.add(title)
-            full_url = href if href.startswith("http") else f"https://www1.hkexnews.hk{href}"
-            items.append({"date": "", "title": title, "url": full_url, "source": "hkexnews"})
-            if len(items) >= limit:
-                break
-        return items
+        r.raise_for_status()
+        return _parse_hkex_announcements(r.text, code5, limit)
     except Exception:
         return []
 
@@ -254,7 +296,7 @@ def fetch_hk_basic_combined(code5: str) -> dict:
 
 
 def fetch_hk_announcements_cached(code5: str, limit: int = 30) -> list[dict]:
-    return cached(f"HK_{code5}", f"hk_anns_{limit}", lambda: fetch_hk_announcements(code5, limit), ttl=TTL_HOURLY)
+    return cached(f"HK_{code5}", f"hk_anns_issuer_v2_{limit}", lambda: fetch_hk_announcements(code5, limit), ttl=TTL_HOURLY)
 
 
 if __name__ == "__main__":

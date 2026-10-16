@@ -71,6 +71,9 @@ def _cninfo_direct_api(code: str, page_size: int = 30, timeout: int = 15) -> lis
     announcements = data.get("announcements") or []
     rows = []
     for a in announcements[:page_size]:
+        # A successful query is not proof that every returned row belongs to the issuer.
+        if str(a.get("secCode", "")) != code:
+            continue
         # cninfo 时间戳是毫秒
         ts = a.get("announcementTime") or 0
         try:
@@ -85,6 +88,7 @@ def _cninfo_direct_api(code: str, page_size: int = 30, timeout: int = 15) -> lis
             "title": str(a.get("announcementTitle", "")),
             "url": ann_url,
             "type": "cninfo 公告",
+            "stock_code": code, "issuer_verified": True,
         })
     return rows
 
@@ -119,6 +123,8 @@ def _cninfo_disclosures(code: str, days_back: int = 180) -> list[dict]:
             return []
         rows = []
         for _, r in df.head(30).iterrows():
+            if str(r.get("证券代码", "")).zfill(6) != code:
+                continue
             rows.append({
                 "date": str(r.get("公告时间", ""))[:10],
                 "title": str(r.get("公告标题", "")),
@@ -196,7 +202,8 @@ def _web_search_events(name: str, max_results: int = 6) -> list[dict]:
             if "error" in r:
                 continue
             title = r.get("title", "")[:80]
-            if title and title not in seen and not _is_noise_news(title):
+            if (name and name in r.get("title", "") and title
+                    and title not in seen and not _is_noise_news(title)):
                 seen.add(title)
                 results.append({
                     "date": "—",
@@ -214,31 +221,25 @@ def main(ticker: str) -> dict:
         try:
             from lib.hk_data_sources import fetch_hk_announcements_cached
             from lib import data_sources as _ds
-            basic = _ds.fetch_basic(ti)
+            try:
+                basic = _ds.fetch_basic(ti)
+            except Exception:
+                basic = {}
             company_name = basic.get("name") or basic.get("full_name") or ti.code
             anns = fetch_hk_announcements_cached(ti.code.zfill(5), limit=20)
-            # web_search 中文公司名补充（多数港股有中文名）
+            from lib.event_integrity import hk_event_data
+            code5 = ti.code.zfill(5)
+            # Defense in depth against old API caches or unexpected source rows.
+            anns = [a for a in anns if a.get("issuer_verified") is True
+                    and a.get("stock_code") == code5]
             ws_events = _web_search_events(company_name) if len(anns) < 5 else []
-            timeline = [f"{a.get('date','—')} · {a.get('title','')[:80]}" for a in anns + ws_events]
+            for event in ws_events:
+                event.update(stock_code=code5, issuer_verified=True, source="web_search")
             return {
                 "ticker": ti.full,
-                "data": {
-                    "event_timeline": timeline[:30],
-                    "recent_news": [
-                        {"date": a.get("date", ""), "title": a.get("title", ""),
-                         "url": a.get("url", ""), "source": a.get("source", "hkexnews")}
-                        for a in anns
-                    ],
-                    "recent_notices": [],
-                    "catalysts": [],
-                    "warnings": [],
-                    "_note": (
-                        "HK 公司公告原文走 hkexnews 法定披露源 + 中文 web search 兜底；"
-                        "若需更精确事件抽取，agent 用 Playwright 打开 hkexnews titlesearch.xhtml POST"
-                    ),
-                },
-                "source": "hkexnews + ddgs",
-                "fallback": False,
+                "data": hk_event_data(code5, anns, ws_events),
+                "source": "hkexnews + company-matched web_search",
+                "fallback": not bool(anns or ws_events),
             }
         except Exception as e:
             return {

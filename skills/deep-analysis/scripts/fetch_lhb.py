@@ -52,6 +52,7 @@ def fetch_sector_lhb(industry: str) -> list[dict]:
         df = ak.stock_lhb_stock_statistic_em(symbol="近一月")
         if df is None or df.empty:
             return []
+        # This endpoint is a market-wide table, not an industry-filtered universe.
         return df.head(50).to_dict("records")
     except Exception:
         return []
@@ -60,9 +61,16 @@ def fetch_sector_lhb(industry: str) -> list[dict]:
 def main(ticker: str) -> dict:
     ti = parse_ticker(ticker)
     if ti.market != "A":
-        return {"ticker": ti.full, "data": {"_note": "lhb only A-share"}, "source": "skip", "fallback": False}
+        return {"ticker": ti.full, "data": {"_note": "lhb only A-share", "status": "not_applicable", "verified": False, "lhb_count_30d": None}, "source": "skip", "fallback": False}
 
-    lhb = ds.fetch_lhb_recent(ti, days=30)
+    evidence = ds.fetch_lhb_evidence(ti, days=30)
+    if not evidence["verified"]:
+        from lib.lhb_evidence import fetch_board_universe
+        fallback = fetch_board_universe(ti.code, 30)
+        evidence["universe_evidence"] = fallback
+        if fallback["verified"] and fallback["status"] == "no_records":
+            evidence.update(status="no_records", verified=True, records=[], board_dates=[], failed_dates=[])
+    lhb = evidence["records"]
     matched = match_seats_in_lhb(lhb)
     split = split_inst_vs_youzi(lhb)
 
@@ -72,13 +80,22 @@ def main(ticker: str) -> dict:
     return {
         "ticker": ti.full,
         "data": {
-            "lhb_count_30d": len(lhb),
+            "lhb_count_30d": len(evidence["board_dates"]) if evidence["status"] in ("ok", "no_records", "partial") else None,
+            "seat_record_count": len(lhb),
+            "status": evidence["status"],
+            "verified": evidence["verified"],
+            "errors": evidence.get("errors", []),
+            "failed_dates": evidence.get("failed_dates", []),
+            "board_dates": evidence.get("board_dates", []),
+            "fetched_at": evidence.get("fetched_at"),
+            "universe_evidence": evidence.get("universe_evidence"),
             "lhb_records": lhb[:30],
             "matched_youzi": list(matched.keys()),
             "matched_youzi_detail": {k: v[:3] for k, v in matched.items()},
-            "inst_vs_youzi": split,
+            "inst_vs_youzi": split if evidence["verified"] else {k: None for k in split},
             "sector_lhb_top50": sector[:30],
-            "sector_leader_hint": sector[0]["代码"] if sector and "代码" in sector[0] else None,
+            "sector_leader_hint": None,
+            "sector_lhb_scope": "market_wide_unfiltered",
         },
         "source": "akshare:stock_lhb_stock_detail_em + statistic + seat_db",
         "fallback": False,
