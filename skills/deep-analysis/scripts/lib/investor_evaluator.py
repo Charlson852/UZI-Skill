@@ -23,6 +23,7 @@ from lib.investor_db import by_id
 from lib.panel_evidence import model_gap
 
 import os
+import math
 from typing import Any
 
 from lib.investor_criteria import INVESTOR_RULES, Rule
@@ -143,6 +144,22 @@ def _extract_keys(template: str) -> list[str]:
     return re.findall(r"\{([a-zA-Z_][a-zA-Z0-9_]*)", template)
 
 
+class _EvidenceFeatures(dict):
+    """Do not let rule defaults or boolean coercion turn unknown into evidence."""
+
+    def __getitem__(self, key):
+        value = super().__getitem__(key)
+        if value is None or isinstance(value, str) and value.strip() in {"", "—", "N/A"}:
+            raise KeyError(key)
+        if isinstance(value, (int, float)) and not math.isfinite(value):
+            raise ValueError(f"Non-finite evidence: {key}")
+        self.used_evidence = True
+        return value
+
+    def get(self, key, default=None):
+        return self[key]
+
+
 def _safe_check(rule: Rule, features: dict) -> bool | None:
     """Run rule.check guarded against exceptions.
 
@@ -153,7 +170,9 @@ def _safe_check(rule: Rule, features: dict) -> bool | None:
                 Caller should treat this as "skip" (not pass, not fail).
     """
     try:
-        return bool(rule.check(features))
+        evidence = _EvidenceFeatures(features)
+        result = bool(rule.check(evidence))
+        return result if getattr(evidence, "used_evidence", False) else None
     except (KeyError, TypeError, ValueError, ZeroDivisionError):
         # 数据缺失导致比较类型错误（如 None >= 5）→ 跳过，不判负。
         # 有真实数据的规则不会走到这里（键值都是数值）。

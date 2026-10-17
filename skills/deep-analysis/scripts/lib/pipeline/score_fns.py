@@ -1034,36 +1034,11 @@ def generate_synthesis(raw: dict, dims_scored: dict, panel: dict, agent_analysis
     consensus = panel.get("panel_consensus") if consensus_valid else 0.0
     fund_score_old = fund_score
     consensus_old = consensus
+    feat_for_style = {}
     try:
         from lib.stock_style import detect_style, apply_style_weights, STYLE_LABELS, STYLE_EXPLANATIONS
-        # Build feature dict for style detection
-        bd = basic
-        try:
-            mcap_yi = float(bd.get("market_cap_raw") or 0) / 1e8 if bd.get("market_cap_raw") else 0
-        except (ValueError, TypeError):
-            mcap_yi = 0
-        # 简化的局部数字转换（避开 generate_synthesis 内 _f 作用域冲突）
-        def _ff(v, dflt=0.0):
-            try:
-                if v is None or v == "":
-                    return dflt
-                return float(str(v).replace(",", "").replace("%", "").replace("亿", "").replace("+", "").strip())
-            except (ValueError, TypeError):
-                return dflt
-        d_fin = (dims_scored.get("dimensions", {}).get("1_financials") or {})
-        feat_for_style = {
-            "code": raw.get("ticker", ""),
-            "market": raw.get("market", "A"),
-            "industry": bd.get("industry", "") or "",
-            "market_cap_yi": mcap_yi,
-            "pe": _ff(bd.get("pe_ttm")),
-            "pe_ttm": _ff(bd.get("pe_ttm")),
-            "pb": _ff(bd.get("pb")),
-            "roe_5y_avg": _ff(d_fin.get("roe_5y_avg")),
-            "roe_5y_min": _ff(d_fin.get("roe_5y_min")),
-            "revenue_growth_3y_cagr": _ff(d_fin.get("revenue_growth_3y_cagr")),
-            "dividend_yield": _ff(bd.get("dividend_yield_ttm")),
-        }
+        from lib.stock_features import extract_features
+        feat_for_style = extract_features(raw, dims_scored)
         style_label = detect_style(feat_for_style, raw)
         adj = apply_style_weights(panel.get("investors", []), dims_scored, style_label)
         fund_score = adj["fundamental_score"]
@@ -1364,6 +1339,7 @@ def generate_synthesis(raw: dict, dims_scored: dict, panel: dict, agent_analysis
         "style_label_cn": (lambda: __import__("lib.stock_style", fromlist=["STYLE_LABELS"]).STYLE_LABELS.get(style_label, "?"))() if style_label else "?",
         "style_explanation": (lambda: __import__("lib.stock_style", fromlist=["STYLE_EXPLANATIONS"]).STYLE_EXPLANATIONS.get(style_label, ""))() if style_label else "",
         "style_diagnostics": style_diag,
+        "quant_signal": feat_for_style.get("_quant_signal", {"evidence_status": "not_scanned"}),
         "agent_reviewed": bool(ag.get("agent_reviewed")),
         "panel_insights": ag.get("panel_insights") or "",
         "claude_narrative_stub": {

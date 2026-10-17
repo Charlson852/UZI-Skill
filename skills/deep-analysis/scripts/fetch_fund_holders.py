@@ -54,10 +54,7 @@ MANAGER_AVATAR_MAP = {
 
 
 def _recent_quarter_date() -> str:
-    """Return the most recent reported quarter in YYYYMMDD format.
-    Q1 report comes out in April; Q2 in August; Q3 in Oct; Q4 in March next year.
-    We return the latest quarter for which a report likely exists.
-    """
+    """Most recent completed quarter; this does NOT imply it is disclosed."""
     today = datetime.now()
     y, m = today.year, today.month
     if m >= 10:
@@ -67,6 +64,13 @@ def _recent_quarter_date() -> str:
     if m >= 4:
         return f"{y}0331"
     return f"{y - 1}1231"
+
+
+def _holding_period_candidates() -> list[str]:
+    latest = _recent_quarter_date()
+    suffixes = ("0331", "0630", "0930", "1231")
+    index = int(latest[:4]) * 4 + suffixes.index(latest[4:])
+    return [f"{(index - offset) // 4}{suffixes[(index - offset) % 4]}" for offset in range(4)]
 
 
 def fetch_holding_funds(ticker_code: str, date: str = "") -> list[dict]:
@@ -94,15 +98,20 @@ def fetch_holding_funds(ticker_code: str, date: str = "") -> list[dict]:
             })
         return out
     except Exception as e:
-        # Fallback: try the original but likely broken
-        try:
-            df = ak.stock_report_fund_hold_detail(symbol="基金持仓", date=date or "20241231")
-            if df is None or df.empty:
-                return []
-            sub = df[df.get("股票代码", "").astype(str) == ticker_code]
-            return sub.head(20).to_dict("records")
-        except Exception:
-            return [{"error": f"both fund lookup methods failed: {e}"}]
+        # Probe completed periods, accepting only actual rows with fund identities.
+        for period in ([date] if date else _holding_period_candidates()):
+            try:
+                df = ak.stock_report_fund_hold_detail(symbol="基金持仓", date=period)
+                if df is None or df.empty or not {"股票代码", "基金代码"}.issubset(df.columns):
+                    continue
+                sub = df[df["股票代码"].astype(str) == ticker_code].copy()
+                if sub.empty:
+                    continue
+                sub["截止日期"] = period
+                return sub.to_dict("records")
+            except Exception:
+                continue
+        return [{"error": f"both fund lookup methods failed: {e}"}]
 
 
 def compute_fund_stats(fund_code: str) -> dict:

@@ -173,7 +173,7 @@ def detect_style(features: dict, raw: dict | None = None) -> str:
     # 1. 困境反转：PB<1 且 ROE 5 年最低 < 5（含负值 — ST 股 / 周期低谷）
     # BUG#R1 fix: 旧条件 `0 < roe_5y_min < 5` 漏掉了负 ROE（ST 股普遍亏损），
     # 导致负 ROE 反而被判为 small_speculative
-    if 0 < pb < 1.0 and roe_5y_min < 5:
+    if features.get("roe_5y_min") is not None and 0 < pb < 1.0 and roe_5y_min < 5:
         return DISTRESSED
 
     # 2. 量化因子型：多家量化基金 top-10 重仓
@@ -183,10 +183,11 @@ def detect_style(features: dict, raw: dict | None = None) -> str:
             features.get("code") or raw.get("ticker", ""),
             raw.get("fund_managers", []),
         )
+        features["_quant_signal"] = sig
         if sig.get("is_quant_factor_style"):
             return QUANT_FACTOR
     except Exception:
-        pass
+        features["_quant_signal"] = {"evidence_status": "unavailable"}
 
     # 3. A 股小盘投机：mcap<100 亿 + A 股
     if market == "A" and 0 < mcap_yi < 100:

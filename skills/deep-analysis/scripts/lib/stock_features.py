@@ -23,7 +23,8 @@ def _f(v, default=0.0) -> float:
         s = str(v).strip().replace(",", "").replace("%", "").replace("+", "").replace("¥", "").replace("亿", "")
         if not s or s in ("-", "—", "None", "nan", "N/A"):
             return default
-        return float(s)
+        value = float(s)
+        return value if math.isfinite(value) else default
     except (ValueError, TypeError):
         return default
 
@@ -56,9 +57,7 @@ def _pct_change(values: list, n: int = 1) -> float:
 
 
 def _avg(values: list, default: float = 0.0) -> float:
-    # v3.9.4 · 与 _min 对齐：保留 0 值（!= 0），此前只对正值取平均会把亏损年份剔除，
-    # 让 ROE 均值虚高（[-3,-5,15,18,20] 真实均值 9.0 被算成 17.7）
-    vals = [_f(v) for v in values if _f(v) != 0]
+    vals = [n for v in values if (n := _f(v, None)) is not None]
     return sum(vals) / len(vals) if vals else default
 
 
@@ -69,7 +68,7 @@ def _last(values: list, default: float = 0.0) -> float:
 
 
 def _min(values: list, default: float = 0.0) -> float:
-    vals = [_f(v) for v in values if _f(v) != 0]
+    vals = [n for v in values if (n := _f(v, None)) is not None]
     return min(vals) if vals else default
 
 
@@ -92,6 +91,11 @@ def extract_features(raw: dict, dims: dict) -> dict:
     from lib.event_integrity import sanitize_hk_events
     if raw:
         sanitize_hk_events(raw)
+    raw = raw or {}
+    raw = {**raw, "dimensions": {
+        key: entry for key, entry in (raw.get("dimensions") or {}).items()
+        if isinstance(entry, dict) and entry.get("status") not in {"error", "failed", "timeout", "unavailable"}
+    }}
     f: dict[str, Any] = {}
     dim_data = raw.get("dimensions", {}) if raw else {}
 
@@ -161,7 +165,7 @@ def extract_features(raw: dict, dims: dict) -> dict:
     f["revenue_growth_period"] = fin.get("revenue_growth_period")
     f["revenue_growth_basis"] = fin.get("revenue_growth_basis")
     f["revenue_growth_source"] = fin.get("revenue_growth_source")
-    f["revenue_growth_3y_cagr"] = ((_last(rev_hist) / _f(rev_hist[-4])) ** (1/3) - 1) * 100 if len(rev_hist) >= 4 and _f(rev_hist[-4]) > 0 else 0
+    f["revenue_growth_3y_cagr"] = ((_last(rev_hist) / _f(rev_hist[-4])) ** (1/3) - 1) * 100 if len(rev_hist) >= 4 and _f(rev_hist[-4]) > 0 and _last(rev_hist) >= 0 else 0
 
     f["net_profit_latest_yi"] = profit_ttm if profit_ttm is not None else _last(np_hist)
     f["net_profit_latest_basis"] = "ttm" if profit_ttm is not None else "annual"
@@ -666,7 +670,8 @@ def extract_features(raw: dict, dims: dict) -> dict:
     for _k in _NO_DATA_KEYS:
         f[_k] = None
 
-    return f
+    from lib.feature_evidence import apply_feature_evidence
+    return apply_feature_evidence(f, raw)
 
 
 def summary(features: dict) -> str:
@@ -675,10 +680,10 @@ def summary(features: dict) -> str:
     lines.append(f"{features.get('name')} ({features.get('code')})")
     lines.append(f"  价格 ¥{features.get('price')} · 市值 {features.get('market_cap_yi')}亿 · 行业 {features.get('industry')}")
     lines.append(f"  PE {features.get('pe')} · PB {features.get('pb')} · PE 5Y分位 {features.get('pe_quantile_5y')}")
-    lines.append(f"  ROE 最新 {features.get('roe_latest')}% · 5Y均 {features.get('roe_5y_avg'):.1f}% · 5Y>=15%: {features.get('roe_5y_above_15')}/5")
-    lines.append(f"  营收增速 {features.get('revenue_growth_latest'):.1f}% · 净利率 {features.get('net_margin')}% · 负债率 {features.get('debt_ratio')}%")
+    lines.append(f"  ROE 最新 {features.get('roe_latest')}% · 5Y均 {features.get('roe_5y_avg')}% · 5Y>=15%: {features.get('roe_5y_above_15')}/5")
+    lines.append(f"  营收增速 {features.get('revenue_growth_latest')}% · 净利率 {features.get('net_margin')}% · 负债率 {features.get('debt_ratio')}%")
     lines.append(f"  Stage {features.get('stage')} · MA多头 {features.get('ma_bull_aligned')} · RSI {features.get('rsi')}")
-    lines.append(f"  研报覆盖 {features.get('research_coverage')} · 买入率 {features.get('buy_rating_pct')}% · 目标涨幅 {features.get('upside_to_target'):.1f}%")
+    lines.append(f"  研报覆盖 {features.get('research_coverage')} · 买入率 {features.get('buy_rating_pct')}% · 目标涨幅 {features.get('upside_to_target')}%")
     lines.append(f"  护城河 {features.get('moat_total')}/40 · 基金经理 {features.get('fund_manager_count')} · 杀猪盘 {features.get('trap_level')}")
     return "\n".join(lines)
 

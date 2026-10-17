@@ -118,7 +118,7 @@ def render_friendly_layer(syn: dict, raw: dict) -> str:
 
 ## ─── 基金经理抄作业面板 ───
 
-def render_fund_managers(managers: list) -> str:
+def render_fund_managers(managers: list, quant_signal: dict | None = None) -> str:
     """For each fund manager holding this stock, render a performance card.
     managers = [
       {
@@ -140,6 +140,15 @@ def render_fund_managers(managers: list) -> str:
       },
     ]
     """
+    if quant_signal is not None:
+        sig = escape_payload(quant_signal)
+        status = {"available": "样本可用", "partial": "部分缺失", "unavailable": "证据不足",
+                  "not_scanned": "未扫描", "not_applicable": "不适用"}.get(sig.get("evidence_status"), "未知")
+        periods = "、".join(sig.get("report_periods") or []) or "未取得"
+        note = (f'<p class="fund-evidence">分散持仓启发式：{status}；报告期：{periods}；'
+                f'可用样本 {sig.get("verified_funds_total", 0)}/{sig.get("active_funds_total", 0)}。'
+                '仅限已扫描基金；不代表确认的量化策略，未核验公告时间，不用于历史时点回测。</p>')
+        return note + render_fund_managers(managers)
     managers = escape_payload(managers)
     if not managers:
         return '<div style="padding:24px;text-align:center;color:#94a3b8;font-size:12px">暂无公募基金持仓数据</div>'

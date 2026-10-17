@@ -566,7 +566,7 @@ def assemble(ticker: str) -> Path:
     fund_managers = (syn.get("fund_managers") or raw.get("fund_managers") or [])
     template = template.replace(
         "<!-- INJECT_FUND_MANAGERS -->",
-        render_fund_managers(fund_managers),
+        render_fund_managers(fund_managers, syn.get("quant_signal")),
     )
 
     # 19 维深度数据卡 · 6 大类

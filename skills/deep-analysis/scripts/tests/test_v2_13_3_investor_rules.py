@@ -122,14 +122,14 @@ def test_lynch_ideal_peg_under_1():
     features = {
         "market": "A", "ticker": "test", "name": "test", "industry": "消费",
         "pe": 15,
-        "revenue_growth_latest": 20,  # PEG = 0.75
+        "revenue_growth_latest": 25,  # PEG = 0.6; strictly inside the 20-50% band
         "research_coverage": 10,
         "buy_rating_pct": 70,
     }
     r = evaluate("lynch", features)
-    # peg_ideal (5) + pe_not_rolls_royce (3) + fast_grower_zone (3) + understandable (2) + research (2)
-    # = 15/18 ≈ 83
+    # Only evidence-backed rules count; the constant "understandable" stub abstains.
     assert r["score"] > 70
+    assert "understandable" not in {rule["rule_id"] for rule in r["pass_rules"]}
 
 
 def test_lynch_rejects_pe_over_40():
