@@ -19,7 +19,7 @@
 [![Methods](https://img.shields.io/badge/Institutional%20Methods-22-red)]()
 [![Self-Review](https://img.shields.io/badge/Self--Review-13%20checks-blueviolet)](skills/deep-analysis/scripts/lib/self_review.py)
 
-A 股 / 港股 / 美股 · 个股深度分析引擎 · **66 位评审团 × 9 大流派 × 22 维数据 × 22 种机构方法** · 最新 **v3.9.4**：前端显示修复 + 美化（kimi-k3）· 完整演进见 [更新日志](#-更新日志)
+A 股 / 港股 / 美股 · 个股深度分析引擎 · **66 位评审团 × 9 大流派 × 22 维数据 × 22 种机构方法** · **main 更新至 2026-10-18**：缺失值证据门控 + 基金持仓时效修复 · manifest 版本 **v3.9.4** · 完整演进见 [更新日志](#-更新日志)
 
 [安装](#安装) · [用法](#用法) · [三档深度](#-三档思考深度v2103-新增) · [Hermes 🆕](INSTALL-HERMES.md) · [评审团](#-66-位评审团) · [Serenity 🆕](#-i-组--serenity--ai-卡位瓶颈猎手) · [机构方法](#-22-种机构级方法) · [自查 gate](#-机械级自查-gatev29-起) · [报告截图](#-报告长什么样) · [FAQ](#-faq) · [入群交流测试](#-测试交流群) · [Contributors](CONTRIBUTORS.md)
 
@@ -65,7 +65,8 @@ A 股 / 港股 / 美股 · 个股深度分析引擎 · **66 位评审团 × 9 �
 /stock-deep-analyzer:dcf 600519                ← DCF 估值专项
 ```
 
-> 💡 **当前最新稳定版 v3.9.4** · 完整演进见 [更新日志](#-更新日志)：
+> 💡 **main 最新维护：2026-10-18 · manifest 版本 v3.9.4** · 最近维护更新尚未单独升级版本号，完整演进见 [更新日志](#-更新日志)：
+> - **证据与数据完整性**：缺失值不伪装成 `0/False`、无证据规则弃权；基金持仓按实际返回报告期比较，报告显示时效与覆盖。离线回归 **948 passed、1 skipped**，不代表收益或胜率验证。
 > - **66 位评审团 · 9 大流派**（v3.7 新增 a16z Andreessen / Naval / 黄仁勋 / 马斯克 / 高瓴张磊 / Burry / Chanos 等 13 位 + 独立 I 组 Serenity AI 卡位猎手）· 242 条量化规则
 > - **Serenity 严谨化**（v3.8）：8 罚分因子 + 3 级证据阶梯（"有定点量产"≈90 分 vs "仅题材"≈60 分）+ 供应链 8 层分层
 > - **Tier-1 五方法**（v3.8）：`/ai-readiness` `/earnings-preview` `/model-update` `/returns` `/rebalance`
@@ -864,8 +865,12 @@ python run.py <ticker> --no-resume
 
 ## 📋 更新日志
 
+以下 `main 维护` 条目已推送到主分支，但未单独升级 manifest 版本或发布新版本标签；当前 manifest 仍为 `v3.9.4`。
+
 | 版本 | 日期 | 主要变化 |
 |---|---|---|
+| **main 维护** | **2026-10-18** | **缺失值证据门控 + 基金持仓时效修复**：保留真实零值和亏损，未知字段、失败数据及恒真占位规则不计票；风格识别复用统一特征。持仓按实际返回季度筛选、排序和去重，缓存区分报告期，过期或异常样本降级，HTML 展示样本期与覆盖。补修行业占位符、负营收 CAGR、基金代码空格、百分号权重及市场后缀。新增 56 项回归，全量 **948 passed、1 skipped**；[提交 b49bccd](https://github.com/wbh604/UZI-Skill/commit/b49bccdd84c385a491a2001d2297ad256b10b0d7) · [修复说明](docs/maintenance-2026-10-17.md) |
+| **main 维护** | **2026-10-16** | **社区修复整合**：整合 PR #114–#117、#119–#122，修复估值分位解析、macOS Hook、扫描预算、档位缓存、公告归属、龙虎榜证据和评委弃权/重算；补充多市场评委页面核验。全量 **892 passed、1 skipped**；[提交 2c5505d](https://github.com/wbh604/UZI-Skill/commit/2c5505d9d30363379ce708f85cac93f86b2788cf) · [维护记录](docs/maintenance-2026-10-16.md) |
 | **v3.9.4** | 2026-08-08 | **前端显示修复 + 美化（kimi-k3）** · ① None 泄漏清零：政策面（方向/补贴/监管/反垄断）与资金面"主力资金 20日"在数据源返回 null 时曾直接显示 `None`，现统一兜底为 "—"/"数据暂缺"。② 移动端图表裁切：sparkline SVG 固定 220px 宽度撑破容器（LBO 的 EBITDA 路径/债务偿还、维度卡迷你图），改为 `width:100%` 自适应 + 移动端单列堆叠；敏感性表/机构建模表移动端横向可滚动。③ 治理面措辞："关联交易/违规"此前仅因搜过查询词就显示"未发现"（`qualitative_search` 存的是搜索词非结果），改为中性"暂无公开违规记录"。④ 抄作业卡片"时间框架/仓位风格/翻盘条件"标签与正文粘连，改为标签不换行+留白+正文右对齐。⑤ 美化：维度卡顶部常驻分级色条（高绿/中金/低红）+ hover 高亮、全局平滑锚点滚动、文本选择色、`:focus-visible` 聚焦环、细滚动条、section/卡片进入视口轻浮现（尊重 `prefers-reduced-motion`）、TOC 锚点 `scroll-margin` 防遮挡。⑥ 版本对齐：3 个子 skill（investor-panel/lhb-analyzer/trap-detector）原停在 3.9.2 与主 manifest 不一致，全部统一 bump 到 3.9.4。全量 685 passed |
 | **Unreleased** | 2026-08-05 | **全球同行业绩对比 + 数据完整性 hotfix** · 自动按全球细分行业发现候选并补全 Top 8 年度财务，覆盖日/韩/台/新/印/加/澳/英/欧洲等 Yahoo 交易所后缀；原币与 USD 标准化值分离，跨币种原始市值不混算，同行失败隔离、后备候选递补并缓存 24h。报告新增目标高亮、同行中位数、全球分位、规模/毛利率散点和明细表，结果接入 Comps 与维度评分。同步包含 issue #87/#90 的行情 scale、自身同行剔除和美股 TTM 修复。22 个全球同行专项测试 · 全量 685 passed |
 | **v3.9.3** | 2026-08-07 | **茅台深度实测驱动的数据/渲染修复** · ① 现金流误判：`fcf_positive` 从 OCF/净利比改为真实 FCF，茅台(FCF 658亿)不再显示"现金流为负"；`_ic_risks` 的"行业周期下行"不再无条件追加，仅行业判定衰退时才算。② 同行修复：push2 被反爬时 4_peers 曾只剩自己一行("暂无可比股")——新增 INDUSTRY_PEERS 硬编码同行兜底(白酒→五粮液/泸州老窖/洋河/山西汾酒)，用 `stock_financial_analysis_indicator_em`(不走 push2)拉 ROE。③ 渲染修复：评委 pass/fail dict 不再泄漏成 Python 字面量(报告曾出现 162 处 `{'msg':...}`)；4_peers 对比条 `abs(None)` 崩溃；一致目标价不再显示"(None)"。④ deep 档强制 agent 介入 role-play：`--depth deep` 不再 CLI 一把梭，须 stage1 → 读 persona → 写 agent_analysis.json(`per_investor_override` 已能真正合并)。⑤ Codex 评审反馈(P1/P2)：`fcf_positive` 优先用真实经营现金流(净利×0.8 仅作缺失回退)；同行兜底补别名匹配(集成电路→半导体 / 工业金属→有色金属)且被分析股不在同行列表时补 self 行；HK rank-only 的 `peer="—"` 不再被渲染成 0 对比条。45+ 回归测试 |
